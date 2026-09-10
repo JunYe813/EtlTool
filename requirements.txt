@@ -1,0 +1,12 @@
+# 电商数仓 + BI 看板 依赖
+# 安装： pip install -r requirements.txt
+#
+# 注意：本机 venv 装的是 psycopg2（源码版）而非 psycopg2-binary。
+# 两者都提供 psycopg2 模块，装哪个都能跑；psycopg2-binary 免编译更好装。
+
+pandas>=2.0
+SQLAlchemy>=2.0
+psycopg2-binary>=2.9
+python-dotenv>=1.0
+streamlit>=1.40
+altair>=5.0        # 看板图表；Streamlit 已内置，显式声明避免版本漂移
