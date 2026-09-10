@@ -131,6 +131,74 @@ if trend_cats:
 
 st.divider()
 
+
+# ---------- 商品按天汇总 ----------
+st.subheader("单日单品 TopN（爆单榜）")
+topn = st.slider("groupProDate", 5, 50, TOP_N, key="group_Pro_Date")
+st.caption(
+    "每条记录 = 某商品在某一天的销售汇总（数据源 dws_sale_daily_product）。"
+    "按单日 GMV 排序取前 N，用于定位销售峰值日；"
+    "要看区间累计最高商品请见下方「热销商品 TopN」。"
+)
+productsDate = query(
+    f"""
+    SELECT purchase_at as purchase_date,
+           product_id,
+           category_name,
+           order_cnt,
+           item_cnt,
+           gmv
+    FROM dws_sale_daily_product
+    WHERE purchase_at BETWEEN :d1 AND :d2
+    ORDER BY gmv DESC, purchase_date, product_id
+    LIMIT :topn
+    """,
+    date_params(f) + (("topn", topn),),
+)
+
+if productsDate.empty:
+    st.info("当前筛选条件下没有商品数据。")
+else:
+    productsDate = productsDate.reset_index(drop=True)
+    productsDate["label"] = (
+    productsDate["purchase_date"].dt.strftime("%Y-%m-%d")   # 日期放最前面
+        + " · " + productsDate["category_name"].str.slice(0, 12)  # 类目缩到 12 字，给日期腾地方
+        + " · " + productsDate["product_id"].str.slice(0, 8)
+    )
+    # productsDate.index = productsDate.index + 1     # 排名从 1 开始
+
+    # 横向柱状图展示
+    st.altair_chart(
+        alt.Chart(productsDate)
+        .mark_bar()
+        .encode(
+            x = alt.X("gmv:Q",title="GMV(R$)"),
+            y = alt.Y("label:N",title=None,sort="-x"),
+            tooltip=[
+                    alt.Tooltip("purchase_date:T", title="日期", format="%Y-%m-%d"),
+                    alt.Tooltip("product_id:N", title="商品 ID"),
+                    alt.Tooltip("category_name:N", title="类目"),
+                    alt.Tooltip("gmv:Q", title="GMV", format=",.0f"),
+                    alt.Tooltip("order_cnt:Q", title="订单数", format=","),
+                    alt.Tooltip("item_cnt:Q", title="销量", format=",")
+                ]
+            )
+        .properties(height=600, title="商品按天汇总"),
+        width="stretch"
+
+    )
+
+    st.dataframe(
+        productsDate.rename(columns={
+            "product_id": "商品 ID", "category_name": "类目",
+            "gmv": "GMV", "order_cnt": "订单数", "qty": "销量",
+        }),
+        width="stretch",
+    )
+
+
+
+
 # ---------- 热销商品 TopN ----------
 st.subheader("热销商品 TopN")
 topn = st.slider("TopN", 5, 50, TOP_N, key="topn_products")
@@ -151,11 +219,34 @@ products = query(
     date_params(f) + cat_params + (("topn", topn),),
 )
 
+
 if products.empty:
     st.info("当前筛选条件下没有商品数据。")
 else:
     products = products.reset_index(drop=True)
+    products["label"] = products["category_name"].str.slice(0, 18) + " · " + products["product_id"].str.slice(0, 8)
     products.index = products.index + 1     # 排名从 1 开始
+
+    # 横向柱状图展示
+    st.altair_chart(
+        alt.Chart(products)
+        .mark_bar()
+        .encode(
+            x = alt.X("gmv:Q",title="GMV(R$)"),
+            y = alt.Y("label:N",title=None,sort="-x"),
+            tooltip=[
+                alt.Tooltip("product_id:N", title="商品 ID"),   # 完整 ID
+                alt.Tooltip("category_name:N", title="类目"),
+                alt.Tooltip("gmv:Q", title="GMV", format=",.0f"),
+                alt.Tooltip("order_cnt:Q", title="订单数", format=","),
+                alt.Tooltip("qty:Q", title="销量", format=",")
+                ]
+            )
+        .properties(height=600, title="热销商品 TopN"),
+        width="stretch"
+
+    )
+
     st.dataframe(
         products.rename(columns={
             "product_id": "商品 ID", "category_name": "类目",

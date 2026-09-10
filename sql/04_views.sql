@@ -120,7 +120,7 @@ FROM ads_user_retention;
 -- ③ 留存长表应有 613 × 4 = 2452 行
 -- SELECT window_days, COUNT(*) FROM v_retention_curve GROUP BY 1 ORDER BY 1;
 
--- ④ 剔除右删失与小样本后的真实留存曲线（这是能对外讲的数字）
+-- ④ 剔除右删失与小样本后的真实留存曲线
 -- SELECT window_days,
 --        COUNT(DISTINCT cohort_date) AS cohorts,
 --        ROUND(SUM(retained_cnt)::NUMERIC / SUM(cohort_size), 4) AS retention_rate
