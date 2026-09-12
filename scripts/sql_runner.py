@@ -1,8 +1,12 @@
 """
 SQL 脚本执行的公共逻辑
 
-被 run_sql.py / ads_build.py / run_all.py / check_ads.py 复用，
-避免连接和执行的样板代码在 4 个脚本里各写一遍。
+被 run_sql.py / ads_build.py / run_all.py / check_idempotent.py / check_incremental.py
+复用，避免连接和执行的样板代码在每个脚本里各写一遍。
+
+分两类调用方：
+  - ETL 本体（ads_build / run_all）：真正跑数据
+  - 核对脚本（check_*）：只读数据算指标，或跑一次重建再比对指纹
 """
 import re
 import sys
@@ -21,7 +25,6 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, OSError):
         pass
 
-from sqlalchemy import text                      # noqa: E402
 from sqlalchemy.engine import Engine             # noqa: E402
 
 from config import get_engine                    # noqa: E402,F401  (重新导出给调用方)
@@ -40,13 +43,13 @@ def _display(path: Path) -> str:
         return str(path)
 
 
-def execute_script(engine: Engine, sql: str) -> None:
+def execute_script(engine: Engine, sql: str, params=None) -> None:
     """
     在一个事务里原样执行一段（可含多条语句的）SQL。
 
     为什么用原生 DBAPI 游标，而不是 text() 或 exec_driver_sql()：
-      - text() 会把 SQL 里的冒号当绑定参数解析。本项目脚本大量使用 ::NUMERIC
-        / ::date 显式转型，交给它解析容易踩坑。
+      - 识别问题：text() 会把 SQL 里的冒号当绑定参数解析。本项目脚本大量使用 ::NUMERIC
+        / ::date 显式转型。
       - exec_driver_sql() 在语句含**字面量 %** 时会出问题：04_views.sql 里算
         GMV 占比用到 `SUM(gmv) * 100.0 / ...`，SQLAlchemy 会把 C 扩展的
         immutabledict 作为参数透传给 psycopg2，而它不是 dict/sequence，
@@ -60,11 +63,12 @@ def execute_script(engine: Engine, sql: str) -> None:
     """
     with engine.begin() as conn:
         raw_conn = conn.connection.driver_connection      # 底层 psycopg2 连接
+        assert raw_conn is not None
         with raw_conn.cursor() as cur:
-            cur.execute(sql)
+            cur.execute(sql,params)
 
 
-def run_sql_file(engine: Engine, rel_path) -> list:
+def run_sql_file(engine: Engine, rel_path, params=None) -> list:
     """执行一个 SQL 文件（支持多语句脚本），返回文件内创建的表/视图名列表"""
     path = Path(rel_path)
     if not path.is_absolute():
@@ -74,7 +78,7 @@ def run_sql_file(engine: Engine, rel_path) -> list:
 
     sql = path.read_text(encoding="utf-8")
     t0 = time.perf_counter()
-    execute_script(engine, sql)
+    execute_script(engine, sql, params)
     print(f"  [OK] {_display(path)}  ({time.perf_counter() - t0:.2f}s)")
 
     objects, seen = [], set()
@@ -112,15 +116,33 @@ def drop_all_views(engine: Engine) -> list:
     return names
 
 
-def scalar(engine: Engine, sql: str):
-    """执行单值查询"""
+def _raw_query(engine: Engine, sql: str, params=None) -> list:
+    """
+    用底层 DBAPI 游标查询，返回全部行。
+
+    与 execute_script 同样的理由绕开 SQLAlchemy 的参数解析：
+      - text() 会把 `::date` / `::NUMERIC` 里的冒号当成绑定参数；
+      - 传了 params 时，SQL 里的字面量 `%` 又必须写成 `%%`。
+    原生游标两种情况都原样透传，行为和 psql 一致。
+    """
     with engine.connect() as conn:
-        return conn.execute(text(sql)).scalar()
+        raw_conn = conn.connection.driver_connection
+        assert raw_conn is not None
+        with raw_conn.cursor() as cur:
+            cur.execute(sql, params)
+            if cur.description is None:
+                return []
+            return cur.fetchall()
 
 
-def fetch_all(engine: Engine, sql: str):
-    with engine.connect() as conn:
-        return conn.execute(text(sql)).fetchall()
+def scalar(engine: Engine, sql: str, params=None):
+    """执行单值查询（SQL 里可自由使用 ::cast 与字面量 %）"""
+    rows = _raw_query(engine, sql, params)
+    return rows[0][0] if rows else None
+
+
+def fetch_all(engine: Engine, sql: str, params=None):
+    return _raw_query(engine, sql, params)
 
 
 def count_rows(engine: Engine, name: str) -> int:

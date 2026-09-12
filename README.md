@@ -208,19 +208,65 @@ python scripts/check_idempotent.py --all
 导致两次重跑入榜商品不同、结果不可复现。
 → 已给 `ORDER BY` 加 `product_id` 兜底，排序完全确定。
 
-### 关于「按购买日增量」
+### 按购买日增量加载
 
-大纲里的 `run_all.py --date <某天>` **未实现**，且不能只改 ADS 层：
-`01_dwd.sql` / `02_dws.sql` 都是全量重建，DWD 一跑就把所有分区重算了。
-要做真正的增量，需 DWD / DWS / ADS 三层一起改为
-`DELETE FROM t WHERE purchase_date BETWEEN :start AND :end` + 参数化 INSERT。
+大纲里的 `run_all.py --date <某天>` 已实现。增量**不能只改 ADS 层** ——
+`01_dwd.sql` / `02_dws.sql` 是全量重建，DWD 一跑就把所有日期都重算了。
+所以 DWD / DWS / ADS 三层各配一套增量 SQL，与全量 SQL **并存**：
+
+| 路径 | 文件 | 用途 |
+|---|---|---|
+| 全量 | `sql/01_dwd.sql` · `02_dws.sql` · `03_ads_*.sql` | `DROP` + `CREATE`，首次初始化 / 重置 |
+| 增量 | `sql/load/01_dwd_inc.sql` · `02_dws_inc.sql` · `03_ads_inc.sql` | `DELETE` 区间 + `INSERT`，日常 / 补数 |
+
+两条路径并存是刻意的：**初始化走全量、之后走增量**。增量出问题时能退回全量重建，
+不会把自己锁死（真实 ETL 也是这个模式）。
+
+```bash
+python scripts/run_all.py --date 2017-09-29                  # 默认回看 3 天
+python scripts/run_all.py --date 2017-09-29 --lookback 7     # 自定义回看窗口
+```
+
+**为什么需要回看窗口（`--lookback`，默认 3 天）**：
+只算 `--date` 当天不够。真实上游数据会迟到（今天才推昨天的订单），
+只算当天会让昨天新到的数据永远进不了数仓。所以实际重算 `[date-3, date]` 整段区间。
+
+**水位线** `etl_watermark(job_name, last_date, update_time)` 记录已处理到的购买日。
+更新时用 `GREATEST` —— 补数跑一个更早的日期时水位线不会被拉回去：
+
+```sql
+INSERT INTO etl_watermark (job_name, last_date) VALUES (%(j)s, %(d)s)
+ON CONFLICT (job_name) DO UPDATE
+SET last_date = GREATEST(etl_watermark.last_date, EXCLUDED.last_date)
+```
+
+**并非所有表都能按日增量**（这条最容易讲错）：
+日期 / 月份粒度的 `ads_sale_overview_daily`、`ads_top_product`、`ads_fulfillment_monthly`
+走增量；而 cohort 口径的 `ads_user_retention`、`ads_user_repeat_*` 和
+`ads_top_seller` 只能全量重建 —— 新一天的数据会改变 cohort 定义，
+进而影响**所有历史 cohort** 的留存率。所以增量模式下会
+「增量重跑受影响区间 + 全量重建这几张表」，完整判断表见第十节。
+
+**验收**：`scripts/check_incremental.py` 先记基线指纹、再连跑两次增量，
+最后再用跨多个月的**宽回看窗口**跑一次，断言三者互相一致：
+
+```bash
+python scripts/check_incremental.py
+# 增量验收 PASS：17 个对象 · 增量 ≡ 全量 · 两次增量结果一致 · 宽回看（跨 4 个月）一致 · GMV 三层一致
+```
+
+> 第 ⑥ 步（宽回看窗口）是**回归测试**，专门盯一个已实测复现过的缺陷：
+> `ads_fulfillment_monthly` 是月粒度，DELETE 区间若写成 `IN (start月, end月)`，
+> 回看窗口跨 ≥3 个月时会漏删中间月份 → 撞主键报 `duplicate key`。
+> 默认回看 3 天最多跨 2 个月，所以常规验收抓不到它。详见第十节。
 
 ---
 
 ## 七、验收与对账结果
 
-`python scripts/ads_build.py` 每次构建后自动跑一致性对账，
-而是比对同一口径的不同算法是否互相吻合，数据变动后依然有效）：
+`python scripts/ads_build.py` 每次构建后自动跑一致性对账。
+它不是比对固定的预期数字，**而是比对同一口径的不同算法是否互相吻合**
+（数据变动后依然有效）：
 
 ```
 [OK] GMV 三处一致（ADS 总览 / DWD 订单层 / DWD 明细层）: 13494400.74 == 13494400.74 == 13494400.74
@@ -311,20 +357,37 @@ python scripts/check_dashboard.py
 
 | 优先级 | 事项 | 说明 |
 |---|---|---|
-| 高 | **增量加载** | 水位线表 + 按购买日分区覆盖写 + 迟到数据回看窗口。当前为全量重建，数据量增长后不可行 |
+| ✅ | ~~增量加载~~ | **已完成**（第六节）：水位线表 + 按购买日 `DELETE` 区间覆盖写 + 迟到数据回看窗口 |
+| 高 | **物理分区改造** | 当前用 `DELETE` 区间实现「覆盖写」语义；换成 PG 原生 `PARTITION BY RANGE` 可让 `DROP PARTITION` 替代 `DELETE`，并支持分区裁剪 |
 | 高 | **调度编排** | Airflow DAG：任务依赖 / 失败重试 / SLA 告警 / 按日回补（backfill） |
 | 中 | **运行日志与监控** | `etl_job_log` 记录批次状态、行数、耗时；行数突变告警 |
-| 中 | **DWS 补充粒度** | 增加「按店铺」「按商品」的日汇总表 |
 | 中 | **支付表对账 / 评价表分析** | 支付表做 `Σpayment_value` 与明细金额对账；评价表去重保留最新（同订单存在多条评价） |
+| 中 | **SCD2 拉链表示例** | 给卖家 / 商品维度加 `start_date` / `end_date` / `is_current`，演示缓慢变化维 |
 | 低 | **容器化部署** | docker-compose 一键起 PostgreSQL + 调度 + 看板 |
 | 低 | **数据质量规则表** | 把当前分散的对账 SQL 收敛为可配置的 DQ 规则 + 严重级别 |
 
-> **关于增量，有一个容易讲错的点**：并非所有表都能按日增量更新。
+> **关于增量，有一个容易讲错的点**：并非所有 ADS 表都能按日增量更新。
 >
 > - `ads_sale_overview_daily` / `ads_top_product` / `ads_fulfillment_monthly` 是**日期或月份粒度**，
->   某天数据变化只影响那一天，可以增量覆盖。
+>   某天数据变化只影响那一天，可以增量覆盖 —— 已走增量路径。
 > - 但 `ads_user_retention` / `ads_user_repeat_*` 是 **cohort 口径**：
 >   新一天的数据会改变 cohort 定义，进而影响**所有历史 cohort** 的留存率与复购率。
->   这类表只能全量重建，或先算出受影响的 cohort 列表再定向重算。
+>   `ads_top_seller` 同理（卖家排名是全期口径，不受单日影响）。
+>   这三类只能全量重建，或先算出受影响的 cohort 列表再定向重算 —— 当前选择全量重建。
 >
-> 当前实现的幂等性由「全量重建 + 内容指纹验证」保证，见第六节。
+> 幂等性由两条路径共同保证：增量用「区间 `DELETE` + `INSERT` + 内容指纹」，
+> 全量用「`DROP` + `CREATE` + 内容指纹」，见第六节。
+
+> **粒度不一致的陷阱（已实测复现并修复）**：
+> 增量参数是**日**区间，但 `ads_fulfillment_monthly` 是**月**粒度。
+> DELETE 范围必须按「月」对齐到 `start` / `end` 所在月，且要用
+> `>= start月 AND <= end月` 的**区间**，不能写成 `IN (start月, end月)` ——
+> 回看窗口跨 ≥3 个月时（如 `--lookback 90`），中间月份漏删，随后的 `INSERT`
+> 会重复插入并撞上 `PRIMARY KEY (purchase_month)`，任务报
+> `duplicate key value violates unique constraint` 中断。
+> 默认 `--lookback 3` 最多跨 2 个月，所以这个坑平时看不出来 ——
+> 已加为 `check_incremental.py` 第 ⑥ 步回归。
+>
+> 值得一提：**主键把「静默算错」变成了「响亮失败」**。这张表若没有主键，
+> 漏删的月份会变成重复行、履约订单合计从 99,441 虚增且无人察觉；
+> 有主键则直接抛错，并在 `engine.begin()` 事务里整体回滚，不留半成品。

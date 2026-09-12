@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
 
 from config import DATA_DIR, get_engine      # noqa: E402
 
-# 不导入的文件：地理表 60MB 且业务价值低（数据字典第八节建议跳过）
+# 不导入的文件：地理表 60MB 且业务价值低（数据字典第二节第 8 条建议跳过）
 SKIP_FILES = {"olist_geolocation_dataset.csv"}
 
 # 这两张表含葡萄牙语原文（评价正文、卖家城市名），UTF-8 解码会失败，必须用 latin-1

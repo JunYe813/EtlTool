@@ -21,16 +21,29 @@ from sql_runner import (                      # noqa: E402
     run_sql_file, scalar,
 )
 
-# 顺序即依赖顺序：视图依赖表，表之间互相独立
-ADS_FILES = [
-    "sql/03_ads_sale_overview.sql",
-    "sql/03_ads_top_product.sql",
-    "sql/03_ads_top_seller.sql",
-    "sql/03_ads_user_retention.sql",
-    "sql/03_ads_user_repeat.sql",
-    "sql/03_ads_fulfillment.sql",
-    "sql/04_views.sql",
+# ============ 按「能否按日增量」分组 —— 增量加载（P0-1）的核心判断 ============
+# 判断法则：**这个表的结果是否只依赖本区间的数据？**
+#   ✅ 只依赖本区间        → 可增量（日表 / 月表）
+#   ❌ 依赖全部历史        → 必须全量重建（cohort 口径）
+#   ⚠️ 依赖全量但成本极低  → 全量更简单（表只有几千行）
+
+ADS_INCREMENTAL = [
+    "sql/03_ads_sale_overview.sql",   # 日粒度，只依赖当天
+    "sql/03_ads_top_product.sql",     # 窗口按 purchase_date 分区，每天名次只依赖当天
+    "sql/03_ads_fulfillment.sql",     # 月粒度，只依赖该月
 ]
+
+ADS_FULL_ONLY = [
+    "sql/03_ads_top_seller.sql",      # 全周期累计；仅 3,053 行，全量重建更简单
+    "sql/03_ads_user_retention.sql",  # cohort 口径：分母是「全体买家的首购日」
+    "sql/03_ads_user_repeat.sql",     # cohort 口径：全周期 / 按首购月分组
+]
+
+# 视图必须最后跑（依赖上面所有表）
+VIEWS_FILE = "sql/04_views.sql"
+
+# 全量模式 = 可增量组 + 必须全量组 + 视图
+ADS_FILES = ADS_INCREMENTAL + ADS_FULL_ONLY + [VIEWS_FILE]
 
 # 对账项：同一口径用不同算法算出的值必须相等
 CONSISTENCY_CHECKS = [
@@ -149,23 +162,13 @@ def print_snapshot(engine) -> None:
     print(f"  数据质量：类目 'unknown' 的 GMV 占比 {unknown}%")
 
 
-def rebuild() -> int:
-    """重建全部 ADS 对象并做对账，返回退出码"""
-    engine = get_engine()
+def report_reconciliation(engine) -> int:
+    """
+    一致性对账 + 指标快照，返回退出码。
 
-    print("=" * 68)
-    print("ADS 层构建")
-    print("=" * 68)
-
-    # 先删视图：SQL 文件里的 DROP TABLE 已带 CASCADE，这里再显式做一次是为了
-    # ① 构建日志可见 ② 让 04_views.sql 的 CREATE OR REPLACE VIEW 不受列定义变更限制
-    removed = drop_all_views(engine)
-    print(f"  [OK] 清理旧视图 {len(removed)} 个" + (f": {', '.join(removed)}" if removed else "（首次构建）"))
-
-    for rel_path in ADS_FILES:
-        objects = run_sql_file(engine, rel_path)
-        report_rows(engine, objects)
-
+    抽成独立函数的原因：**全量重建和增量装载两条路径都要跑对账** ——
+    否则增量模式就没有任何校验了。
+    """
     print("\n【一致性对账】")
     all_ok = all(
         check_consistency(engine, label, sqls)
@@ -178,6 +181,45 @@ def rebuild() -> int:
     print("对账结果：" + ("全部通过 [OK]" if all_ok else "存在不一致 [FAIL] 请检查上面标 [FAIL] 的项"))
     print("=" * 68)
     return 0 if all_ok else 1
+
+
+def _rebuild_files(files, title: str) -> int:
+    """公共流程：清理视图 → 依次执行 SQL → 对账"""
+    engine = get_engine()
+
+    print("=" * 68)
+    print(title)
+    print("=" * 68)
+
+    # 先删视图：SQL 文件里的 DROP TABLE 已带 CASCADE，这里再显式做一次是为了
+    # ① 构建日志可见 ② 让 04_views.sql 的 CREATE OR REPLACE VIEW 不受列定义变更限制
+    removed = drop_all_views(engine)
+    print(f"  [OK] 清理旧视图 {len(removed)} 个" + (f": {', '.join(removed)}" if removed else "（首次构建）"))
+
+    for rel_path in files:
+        objects = run_sql_file(engine, rel_path)
+        report_rows(engine, objects)
+
+    return report_reconciliation(engine)
+
+
+def rebuild() -> int:
+    """全量重建全部 ADS 对象（7 张表 + 5 个视图）并做对账"""
+    return _rebuild_files(ADS_FILES, "ADS 层构建（全量）")
+
+
+def rebuild_full_only() -> int:
+    """
+    只重建「必须全量」的那批 + 视图 + 对账 —— 供增量流程（run_all.py --date）调用。
+
+    增量模式下，可增量的三张表已经由 sql/load/03_ads_inc.sql 按区间重算过了，
+    这里只补三件事：
+      - ads_user_retention / ads_user_repeat_*  cohort 口径，依赖全体历史，不能增量
+      - ads_top_seller                          全周期累计，且只有 3,053 行
+      - 5 个视图                                定义未变，但前面 drop_all_views 把它们删了，要重建
+    """
+    return _rebuild_files(ADS_FULL_ONLY + [VIEWS_FILE],
+                          "ADS 层构建（增量模式：必须全量的部分）")
 
 
 if __name__ == "__main__":
