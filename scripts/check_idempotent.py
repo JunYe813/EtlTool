@@ -25,7 +25,7 @@ from sql_runner import fetch_all, get_engine, run_sql_file   # noqa: E402
 
 LAYER_OBJECTS = {
     "dwd": ["dwd_order_detail", "dwd_order"],
-    "dws": ["dws_sale_daily"],
+    "dws": ["dws_sale_daily", "dws_sale_daily_seller", "dws_sale_daily_product"],
     "ads": [
         "ads_sale_overview_daily",
         "ads_top_product",

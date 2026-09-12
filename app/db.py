@@ -90,7 +90,7 @@ def dim_where(f: dict, column: str, key: str) -> tuple:
     """
     生成维度筛选的 SQL 片段，返回 (SQL, 参数元组)。
 
-    column 由本文件写死（不是用户输入），值一律走绑定参数，无注入风险。
+    column 由本文件写，值一律走绑定参数，无注入风险。
     空选择 = 全选，不加条件。
     """
     values = f.get(key) or []
@@ -131,9 +131,9 @@ def render_sidebar_filters() -> None:
     cats = st.sidebar.multiselect(
         "英文类目", category_options(), default=[],
         placeholder="全部类目",
-        help="类目分析页会用到；留空表示全部",
+        help="类目分析页会用到；留空表示全部，本区块按类目维度聚合，不受卖家州筛选影响",
     )
-    states = st.sidebar.multiselect(
+    states = st.sidebar.multiselect( 
         "卖家州", seller_state_options(), default=[],
         placeholder="全部卖家州",
         help="卖家与地区页会用到；留空表示全部",

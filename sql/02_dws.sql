@@ -63,7 +63,6 @@ GROUP BY
 
 
 
-
 -- 建表：dws_sale_daily_product（按天 x 商品）
 DROP TABLE IF EXISTS dws_sale_daily_product CASCADE;
 

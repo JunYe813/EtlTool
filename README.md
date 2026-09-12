@@ -24,7 +24,7 @@ flowchart TD
 
     DWD -->|sql/02_dws.sql| DWS
 
-    DWS["<b>DWS 汇总层</b> · dws_sale_daily<br/>购买日 × 英文类目 × 卖家州<br/>gmv / 订单数 / 销量"]
+    DWS["<b>DWS 汇总层</b> · 3 张表<br/>dws_sale_daily · 日 × 类目 × 卖家州<br/>dws_sale_daily_seller · 日 × 卖家<br/>dws_sale_daily_product · 日 × 商品"]
 
     DWS -->|sql/03_ads 系列| ADS
 
@@ -198,7 +198,7 @@ python scripts/check_dashboard.py         # 看板冒烟测试
 
 ```bash
 python scripts/check_idempotent.py --all
-# 幂等验证 PASS：15 个对象重建前后内容完全一致
+# 幂等验证 PASS：17 个对象重建前后内容完全一致
 ```
 
 ### 已知的非确定性问题（已修复）

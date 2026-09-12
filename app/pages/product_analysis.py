@@ -21,6 +21,7 @@ st.caption("数据源：`v_sale_daily_category`（日×类目）+ `dwd_order_det
 
 # ---------- 类目 GMV（按筛选区间重新聚合）----------
 cat_where, cat_params = dim_where(f, "category_name", "cats")
+state_where,state_params = dim_where(f, "seller_state", "states")
 
 cats = query(
     f"""
@@ -149,11 +150,11 @@ productsDate = query(
            item_cnt,
            gmv
     FROM dws_sale_daily_product
-    WHERE purchase_at BETWEEN :d1 AND :d2
+    WHERE purchase_at BETWEEN :d1 AND :d2 {cat_where}
     ORDER BY gmv DESC, purchase_date, product_id
     LIMIT :topn
     """,
-    date_params(f) + (("topn", topn),),
+    date_params(f) + cat_params + (("topn", topn),),
 )
 
 if productsDate.empty:
@@ -190,11 +191,76 @@ else:
 
     st.dataframe(
         productsDate.rename(columns={
-            "product_id": "商品 ID", "category_name": "类目",
-            "gmv": "GMV", "order_cnt": "订单数", "qty": "销量",
+            "purchase_date": "日期","product_id": "商品 ID", "category_name": "类目",
+            "gmv": "GMV", "order_cnt": "订单数", "item_cnt": "销量","label":"标签"
         }),
         width="stretch",
     )
+
+
+
+# ---------- 店铺销量排行 ----------
+st.subheader("店铺 TopN（店铺榜）")
+topn = st.slider("TopShop", 5, 50, TOP_N, key="top_shop")
+st.caption(
+    "每条记录 = 某店铺在某一天的销售汇总（数据源 dws_sale_daily_seller）。"
+    "按单日 GMV 排序取前 N，用于定位销售峰值日。"
+)
+shopDate = query(
+    f"""
+    SELECT purchase_at as purchase_date,
+           seller_id,
+           seller_state,
+           order_cnt,
+           item_cnt,
+           gmv
+    FROM dws_sale_daily_seller
+    WHERE purchase_at BETWEEN :d1 AND :d2 {state_where}
+    ORDER BY gmv DESC, purchase_date, seller_id
+    LIMIT :topn
+    """,
+    date_params(f) + state_params + (("topn", topn),),
+)
+
+if shopDate.empty:
+    st.info("当前筛选条件下没有店铺数据。")
+else:
+    shopDate = shopDate.reset_index(drop=True)
+    shopDate["label"] = (
+    shopDate["purchase_date"].dt.strftime("%Y-%m-%d")   # 日期放最前面
+        + " · " + shopDate["seller_id"].str.slice(0, 12)
+    )
+
+    # 横向柱状图展示
+    st.altair_chart(
+        alt.Chart(shopDate)
+        .mark_bar()
+        .encode(
+            x = alt.X("gmv:Q",title="GMV(R$)"),
+            y = alt.Y("label:N",title=None,sort="-x"),
+            tooltip=[
+                    alt.Tooltip("purchase_date:T", title="日期", format="%Y-%m-%d"),
+                    alt.Tooltip("seller_id:N", title="店铺 ID"),
+                    alt.Tooltip("seller_state:N", title="所在州"),
+                    alt.Tooltip("gmv:Q", title="GMV", format=",.0f"),
+                    alt.Tooltip("order_cnt:Q", title="订单数", format=","),
+                    alt.Tooltip("item_cnt:Q", title="销量", format=",")
+                ]
+            )
+        .properties(height=600, title="店铺按天汇总"),
+        width="stretch"
+
+    )
+
+    st.dataframe(
+        shopDate.rename(columns={
+            "purchase_date": "日期","seller_id": "店铺 ID", "seller_state": "所在州",
+            "gmv": "GMV", "order_cnt": "订单数", "item_cnt": "销量","label":"标签"
+        }),
+        width="stretch",
+    )
+
+
 
 
 
@@ -211,12 +277,12 @@ products = query(
            COUNT(DISTINCT order_id)  AS order_cnt,
            COUNT(*)                  AS qty
     FROM dwd_order_detail
-    WHERE is_valid AND purchase_date BETWEEN :d1 AND :d2 {cat_where}
+    WHERE is_valid AND purchase_date BETWEEN :d1 AND :d2 {cat_where} {state_where}
     GROUP BY product_id
     ORDER BY gmv DESC
     LIMIT :topn
     """,
-    date_params(f) + cat_params + (("topn", topn),),
+    date_params(f) + cat_params + state_params + (("topn", topn),),
 )
 
 
