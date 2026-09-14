@@ -5,8 +5,9 @@
 放在 scripts/ 下，改动看板后跑一遍即可确认没写崩。
 
 两个阶段：
-  阶段 1 · 默认筛选 —— 入口 + 5 个页面各跑一遍
-  阶段 2 · 带筛选条件 —— 只对吃维度筛选的页面跑多个场景
+  阶段 1  · 默认筛选 —— 入口 + 6 个页面各跑一遍
+  阶段 1b · 口径开关 —— 支付对账页的「全量 / 可比对」两条 SQL 分支都要跑到
+  阶段 2  · 带筛选条件 —— 只对吃维度筛选的页面跑多个场景
 
 为什么要有阶段 2：
     全局筛选器为空时，dim_where() 返回的 SQL 片段是空字符串，
@@ -14,6 +15,10 @@
     （A value is required for bind parameter 'xxx'）这类 bug
     在默认筛选下完全正常，冒烟测试也全过，只有用户真去点筛选器才炸。
     阶段 2 主动注入筛选条件，把这条路径覆盖上。
+
+为什么要有阶段 1b：
+    同一个道理 —— 支付对账页按口径开关拼一段 {scope_where}，默认口径下
+    那段代码不执行，只有用户切到「可比对口径」才会走到。必须主动切一次。
 
 用法：
     python scripts/check_dashboard.py
@@ -39,6 +44,7 @@ PAGES = [
     "pages/seller_region.py",
     "pages/user_analysis.py",
     "pages/fulfillment.py",
+    "pages/payment_reconcile.py",
 ]
 
 # 只有这两个页面调用了 dim_where()，会拼 {cat_where} / {state_where}
@@ -154,6 +160,30 @@ def main() -> int:
             for line in err.splitlines():
                 print("       " + line[:130])
             failed.append(page)
+
+    # ---------------- 阶段 1b：支付对账 · 口径开关两个分支 ----------------
+    print("\n[阶段 1b] 支付对账页 · 口径开关（两条 SQL 分支）")
+    rec_page = "pages/payment_reconcile.py"
+    try:
+        at = AppTest.from_file(str(ROOT / "app" / rec_page), default_timeout=120)
+        at.run()
+        if at.exception:
+            raise RuntimeError("\n".join(str(e.value) for e in at.exception))
+        print(f"[OK]   {rec_page:<28} · 默认口径（全量）  （{describe(at)}）")
+
+        opts = list(at.radio[0].options) if at.radio else []
+        if len(opts) > 1:
+            at.radio[0].set_value(opts[1])
+            at.run()
+            if at.exception:
+                raise RuntimeError("\n".join(str(e.value) for e in at.exception))
+            print(f"[OK]   {rec_page:<28} · 切换口径（{opts[1][:16]}…）  （{describe(at)}）")
+        else:
+            print(f"[WARN] {rec_page} 未找到口径开关（radio options={opts}）")
+    except Exception:                              # noqa: BLE001
+        print(f"[FAIL] {rec_page} 口径开关")
+        print(traceback.format_exc())
+        failed.append(f"{rec_page}[口径开关]")
 
     # ---------------- 阶段 2：带筛选条件 ----------------
     print("\n[阶段 2] 带筛选条件（覆盖 dim_where 拼 SQL 的代码路径）")

@@ -67,9 +67,27 @@ def _normalize_dates(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def date_bounds() -> tuple:
-    """数据实际日期范围，用作筛选器默认值（别用 datetime.now()，数据是 2016-2018）"""
-    df = query("SELECT MIN(purchase_date) AS d_min, MAX(purchase_date) AS d_max "
-               "FROM ads_sale_overview_daily")
+    """
+    数据实际日期范围，用作筛选器默认值（别用 datetime.now()，数据是 2016-2018）。
+
+    取两张日表的**并集**，而不是只看销售总览：
+    `ads_payment_reconcile_daily` 走的是**全量订单**口径，日期跨度比有效订单
+    （`ads_sale_overview_daily`）多出 44 天 —— 2018-09-03 之后还有 2018-10-17，
+    共 16 单，全是 unavailable/canceled 的「有支付、无明细」订单。
+
+    若只取销售总览的范围，这 16 单在筛选器里永远选不到，
+    对账页就会显示 99,425 单而表里是 99,441 —— 属于"从界面上看不出来"的口径缺口。
+    """
+    df = query("""
+        SELECT LEAST(
+                   (SELECT MIN(purchase_date) FROM ads_sale_overview_daily),
+                   (SELECT MIN(purchase_date) FROM ads_payment_reconcile_daily)
+               ) AS d_min,
+               GREATEST(
+                   (SELECT MAX(purchase_date) FROM ads_sale_overview_daily),
+                   (SELECT MAX(purchase_date) FROM ads_payment_reconcile_daily)
+               ) AS d_max
+    """)
     return df["d_min"].iloc[0], df["d_max"].iloc[0]
 
 

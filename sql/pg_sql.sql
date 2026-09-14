@@ -48,13 +48,13 @@
 --    订单粒度指标一律走 dwd_order；dws_sale_daily 只用于带维度下钻的 GMV 分析。
 
 -- 日趋势（推荐直接用 ADS 表，客单价口径已在表里写死）
-SELECT purchase_date   AS "购买日期",
-       gmv             AS "GMV",
-       order_cnt       AS "订单数",
-       avg_order_value AS "客单价"
-FROM ads_sale_overview_daily
-ORDER BY purchase_date DESC
-LIMIT 20;
+-- SELECT purchase_date   AS "购买日期",
+--        gmv             AS "GMV",
+--        order_cnt       AS "订单数",
+--        avg_order_value AS "客单价"
+-- FROM ads_sale_overview_daily
+-- ORDER BY purchase_date DESC
+-- LIMIT 20;
 
 -- 区间汇总：注意 buyer_cnt 不可跨天相加（跨天复购的买家每天各计一次），
 -- 区间去重买家必须现算，否则会把 94986 个买家算成 97272。
@@ -81,3 +81,17 @@ LIMIT 20;
 -- FROM v_retention_curve
 -- WHERE is_complete AND cohort_size >= 20
 -- GROUP BY window_days ORDER BY window_days;
+
+
+
+SELECT * FROM olist_order_payments_dataset LIMIT 3;
+
+SELECT * FROM dwd_order LIMIT 3;
+
+SELECT ROUND(SUM(price),2), ROUND(SUM(freight_value),2)
+FROM dwd_order_detail;
+-- 订单层全量 vs 有效口径
+SELECT ROUND(SUM(gmv),2)                             AS 全量口径,
+       ROUND(SUM(freight_total),2)                   AS 全量运费
+FROM dwd_order
+WHERE is_valid;

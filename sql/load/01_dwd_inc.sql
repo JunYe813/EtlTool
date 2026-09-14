@@ -78,3 +78,29 @@ LEFT JOIN
     ) t3
 ON t1.order_id = t3.order_id
 WHERE t1.order_purchase_timestamp::date BETWEEN %(start_date)s AND %(end_date)s;
+
+
+-- ---------------------------------------------------------------
+-- dwd_order_payment（订单粒度支付）
+-- ⚠️ 必须放在 dwd_order 之后：本表的 purchase_date 是从 dwd_order 取的，
+--    上面刚把区间内的 dwd_order 重算完，这里才能拿到正确的日期。
+-- ⚠️ 写法与全量版 sql/04_dwd_payment.sql 必须完全一致，否则
+--    check_incremental 的「增量 ≡ 全量」会失败。
+-- ---------------------------------------------------------------
+DELETE FROM dwd_order_payment
+ WHERE purchase_date BETWEEN %(start_date)s AND %(end_date)s;
+
+INSERT INTO dwd_order_payment
+(order_id, purchase_date, payments_amount, payment_cnt, has_voucher, main_type, create_date)
+SELECT
+    p.order_id,
+    o.purchase_at::date,
+    ROUND(SUM(p.payment_value), 2),
+    COUNT(*),
+    BOOL_OR(p.payment_type = 'voucher'),
+    (ARRAY_AGG(p.payment_type ORDER BY p.payment_value DESC, p.payment_type))[1],
+    CURRENT_TIMESTAMP
+FROM olist_order_payments_dataset p
+JOIN dwd_order o ON o.order_id = p.order_id
+WHERE o.purchase_at::date BETWEEN %(start_date)s AND %(end_date)s
+GROUP BY p.order_id, o.purchase_at::date;

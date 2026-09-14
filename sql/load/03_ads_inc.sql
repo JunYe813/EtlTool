@@ -120,6 +120,81 @@ WHERE purchase_at IS NOT NULL
 GROUP BY DATE_TRUNC('month', purchase_at)::date;
 
 
+-- ---------------------------------------------------------------
+-- ④ ads_payment_reconcile：订单粒度支付对账
+-- 为什么可增量：结果只依赖「本订单自身的明细额与支付额」，与全期历史无关。
+--   一行 = 一个订单，一个订单只属一个购买日，所以可按 purchase_date 区间重算。
+-- ⚠️ items 子查询也要加日期过滤，否则每次增量都全表扫明细层。
+--    dwd_order_detail.purchase_date 与 dwd_order.purchase_at::date 同源
+--    （都由 order_purchase_timestamp::date 得来），过滤后结果等价于全量。
+--    这个等价性由 check_incremental 的「增量 ≡ 全量」断言兜底。
+-- 写法必须与全量版 sql/05_ads_payment_reconcile.sql 完全一致。
+-- ---------------------------------------------------------------
+DELETE FROM ads_payment_reconcile
+ WHERE purchase_date BETWEEN %(start_date)s AND %(end_date)s;
+
+INSERT INTO ads_payment_reconcile
+(order_id,order_status,purchase_date,items_amount,payments_amount,
+ diff_amount,diff_type,is_comparable,create_date)
+WITH items AS (
+    SELECT order_id, SUM(price + COALESCE(freight_value, 0)) AS items_amount
+    FROM dwd_order_detail
+    WHERE purchase_date BETWEEN %(start_date)s AND %(end_date)s
+    GROUP BY order_id
+), pay AS (
+    SELECT order_id, payments_amount
+    FROM dwd_order_payment
+    WHERE purchase_date BETWEEN %(start_date)s AND %(end_date)s
+)
+SELECT
+    o.order_id,
+    o.order_status,
+    o.purchase_at::date                                        AS purchase_date,
+    COALESCE(i.items_amount, 0)                                AS items_amount,
+    COALESCE(p.payments_amount, 0)                             AS payments_amount,
+    ROUND(COALESCE(p.payments_amount,0)
+        - COALESCE(i.items_amount,0), 2)                       AS diff_amount,
+    CASE
+        WHEN i.order_id IS NULL THEN '仅支付无明细'
+        WHEN p.order_id IS NULL THEN '仅明细无支付'
+        WHEN ABS(COALESCE(p.payments_amount,0)
+               - COALESCE(i.items_amount,0)) > 0.01 THEN '金额不符'
+        ELSE '一致'
+    END                                                        AS diff_type,
+    o.order_status NOT IN ('unavailable','canceled')            AS is_comparable,
+    CURRENT_TIMESTAMP
+FROM dwd_order o
+LEFT JOIN items i ON i.order_id = o.order_id
+LEFT JOIN pay   p ON p.order_id = o.order_id
+WHERE o.purchase_at::date BETWEEN %(start_date)s AND %(end_date)s;
+
+
+-- ---------------------------------------------------------------
+-- ⑤ ads_payment_reconcile_daily：对账日汇总
+-- 日粒度，DELETE 与 INSERT 都用 purchase_date，不存在
+-- ads_fulfillment_monthly 那种「月粒度表按日区间删」的漏删问题。
+-- 只存可加的计数与金额，比率在看板现算。
+-- ---------------------------------------------------------------
+DELETE FROM ads_payment_reconcile_daily
+ WHERE purchase_date BETWEEN %(start_date)s AND %(end_date)s;
+
+INSERT INTO ads_payment_reconcile_daily
+(purchase_date, order_cnt, matched_cnt, pay_only_cnt, items_only_cnt,
+ amount_diff_cnt, amount_diff_sum, net_diff)
+SELECT
+    purchase_date,
+    COUNT(*),
+    COUNT(*) FILTER (WHERE diff_type = '一致'),
+    COUNT(*) FILTER (WHERE diff_type = '仅支付无明细'),
+    COUNT(*) FILTER (WHERE diff_type = '仅明细无支付'),
+    COUNT(*) FILTER (WHERE diff_type = '金额不符'),
+    COALESCE(SUM(diff_amount) FILTER (WHERE diff_type = '金额不符'), 0),
+    SUM(diff_amount)
+FROM ads_payment_reconcile
+WHERE purchase_date BETWEEN %(start_date)s AND %(end_date)s
+GROUP BY purchase_date;
+
+
 -- ============================== 校验 ==============================
 -- ① 增量跑完后，GMV 合计仍应等于 13,494,400.74
 -- SELECT ROUND(SUM(gmv),2) FROM ads_sale_overview_daily;
@@ -131,3 +206,10 @@ GROUP BY DATE_TRUNC('month', purchase_at)::date;
 --
 -- ③ 履约漏斗月份数不应变化（25 个月），且订单总数仍为 99,441
 -- SELECT COUNT(*), SUM(order_cnt) FROM ads_fulfillment_monthly;
+--
+-- ④ 对账表：行数 99,441、SUM(diff_amount) 165,318.88、四类 98,362 / 303 / 775 / 1
+-- SELECT COUNT(*), ROUND(SUM(diff_amount),2) FROM ads_payment_reconcile;
+-- SELECT diff_type, COUNT(*) FROM ads_payment_reconcile GROUP BY 1 ORDER BY 2 DESC;
+--
+-- ⑤ 日汇总合计 = 对账明细（订单数 99,441）
+-- SELECT SUM(order_cnt), ROUND(SUM(net_diff),2) FROM ads_payment_reconcile_daily;

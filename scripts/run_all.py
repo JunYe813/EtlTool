@@ -37,7 +37,8 @@ from sql_runner import (                       # noqa: E402
 )
 
 LAYERS = {
-    "dwd": ["sql/01_dwd.sql"],
+    # 顺序即依赖顺序：dwd_order_payment 的 purchase_date 从 dwd_order 取，必须排在其后
+    "dwd": ["sql/01_dwd.sql", "sql/04_dwd_payment.sql"],
     "dws": ["sql/02_dws.sql"],
 }
 
@@ -50,9 +51,10 @@ INCREMENTAL_FILES = [
 
 # 增量路径的前提：这些表必须已存在（增量 SQL 里没有 CREATE）
 REQUIRED_TABLES = [
-    "dwd_order_detail", "dwd_order",
+    "dwd_order_detail", "dwd_order", "dwd_order_payment",
     "dws_sale_daily", "dws_sale_daily_seller", "dws_sale_daily_product",
     "ads_sale_overview_daily", "ads_top_product", "ads_fulfillment_monthly",
+    "ads_payment_reconcile", "ads_payment_reconcile_daily",
 ]
 
 LOOKBACK_DAYS_DEFAULT = 3

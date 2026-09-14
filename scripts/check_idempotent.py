@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 from sql_runner import fetch_all, get_engine, run_sql_file   # noqa: E402
 
 LAYER_OBJECTS = {
-    "dwd": ["dwd_order_detail", "dwd_order"],
+    "dwd": ["dwd_order_detail", "dwd_order", "dwd_order_payment"],
     "dws": ["dws_sale_daily", "dws_sale_daily_seller", "dws_sale_daily_product"],
     "ads": [
         "ads_sale_overview_daily",
@@ -34,6 +34,8 @@ LAYER_OBJECTS = {
         "ads_user_repeat_overall",
         "ads_user_repeat_monthly",
         "ads_fulfillment_monthly",
+        "ads_payment_reconcile",
+        "ads_payment_reconcile_daily",
         "v_sale_daily_category",
         "v_sale_daily_seller_state",
         "v_sale_daily_buyer_state",
@@ -79,7 +81,8 @@ def snapshot(engine, tables) -> dict:
 
 def rebuild_dwd_dws():
     engine = get_engine()
-    for rel_path in ("sql/01_dwd.sql", "sql/02_dws.sql"):
+    # 顺序即依赖顺序：dwd_order_payment 依赖 dwd_order 取日期
+    for rel_path in ("sql/01_dwd.sql", "sql/04_dwd_payment.sql", "sql/02_dws.sql"):
         run_sql_file(engine, rel_path)
 
 

@@ -31,6 +31,8 @@ ADS_INCREMENTAL = [
     "sql/03_ads_sale_overview.sql",   # 日粒度，只依赖当天
     "sql/03_ads_top_product.sql",     # 窗口按 purchase_date 分区，每天名次只依赖当天
     "sql/03_ads_fulfillment.sql",     # 月粒度，只依赖该月
+    # 订单/日粒度：一个订单只属一个购买日，结果只依赖本订单自身的明细额与支付额
+    "sql/05_ads_payment_reconcile.sql",
 ]
 
 ADS_FULL_ONLY = [
@@ -97,6 +99,60 @@ CONSISTENCY_CHECKS = [
             "SELECT COUNT(*) FROM dwd_order_detail WHERE is_valid",
         ],
     ),
+    # ---------- 支付对账（P1-1）----------
+    # 前两条是「跨层兜底」：对账表一旦静默丢行，总额立刻对不上。
+    # 注意这里比的是**全量**口径（不筛 is_valid），因为对账的对象是全部 99,441 单。
+    (
+        "对账表覆盖全量订单（行数 = dwd_order 总行数）",
+        [
+            "SELECT COUNT(*) FROM ads_payment_reconcile",
+            "SELECT COUNT(*) FROM dwd_order",
+        ],
+    ),
+    (
+        "对账表支付额 = 支付表合计（跨层兜底，证明没漏行）",
+        [
+            "SELECT ROUND(SUM(payments_amount), 2) FROM ads_payment_reconcile",
+            "SELECT ROUND(SUM(payment_value), 2) FROM olist_order_payments_dataset",
+        ],
+    ),
+    (
+        "对账表明细额 = 明细层合计（跨层兜底，证明没漏行）",
+        [
+            "SELECT ROUND(SUM(items_amount), 2) FROM ads_payment_reconcile",
+            "SELECT ROUND(SUM(price + COALESCE(freight_value, 0)), 2) FROM dwd_order_detail",
+        ],
+    ),
+    (
+        "对账表明细额 = 订单层全量明细额（口径自洽，锁住「全量 vs is_valid」）",
+        [
+            "SELECT ROUND(SUM(items_amount), 2) FROM ads_payment_reconcile",
+            "SELECT ROUND(SUM(gmv + freight_total), 2) FROM dwd_order",
+        ],
+    ),
+    (
+        "对账四类之和 = 对账总行数（分类无遗漏、无重复）",
+        [
+            "SELECT SUM(c) FROM ("
+            "  SELECT COUNT(*) AS c FROM ads_payment_reconcile GROUP BY diff_type"
+            ") x",
+            "SELECT COUNT(*) FROM ads_payment_reconcile",
+        ],
+    ),
+    (
+        "对账日汇总 = 对账明细（订单数）",
+        [
+            "SELECT SUM(order_cnt) FROM ads_payment_reconcile_daily",
+            "SELECT COUNT(*) FROM ads_payment_reconcile",
+        ],
+    ),
+    (
+        "对账日汇总净额 = 对账明细净额",
+        [
+            "SELECT ROUND(SUM(net_diff), 2) FROM ads_payment_reconcile_daily",
+            "SELECT ROUND(SUM(diff_amount), 2) FROM ads_payment_reconcile",
+        ],
+    ),
 ]
 
 
@@ -161,6 +217,32 @@ def print_snapshot(engine) -> None:
     """)
     print(f"  数据质量：类目 'unknown' 的 GMV 占比 {unknown}%")
 
+    # 支付对账（P1-1）：净差 16.5 万里 98.4% 是「有支付、无明细」的口径问题，
+    # 不是金额错误 —— 那 767 笔里 767 单是 unavailable/canceled，本就不该有明细行。
+    # 剔除后真·金额差异只剩 301 笔 / 3,609.98 元。看板据此做口径切换。
+    rec = fetch_all(engine, """
+        SELECT COUNT(*),
+               COUNT(*) FILTER (WHERE diff_type = '一致'),
+               COUNT(*) FILTER (WHERE diff_type = '金额不符'),
+               COUNT(*) FILTER (WHERE diff_type = '仅支付无明细'),
+               COUNT(*) FILTER (WHERE diff_type = '仅明细无支付'),
+               ROUND(SUM(diff_amount), 2),
+               ROUND(SUM(diff_amount) FILTER (WHERE diff_type = '金额不符'), 2),
+               COUNT(*) FILTER (WHERE NOT is_comparable),
+               COUNT(*) FILTER (WHERE is_comparable),
+               COUNT(*) FILTER (WHERE is_comparable AND diff_type = '一致'),
+               ROUND(SUM(diff_amount) FILTER (WHERE is_comparable), 2)
+        FROM ads_payment_reconcile
+    """)[0]
+    diff_n = rec[2] + rec[3] + rec[4]
+    print(f"  支付对账：参与 {rec[0]:,} 单，一致 {rec[1]:,}，差异 {diff_n:,} 笔"
+          f"（金额不符 {rec[2]} / 仅支付无明细 {rec[3]} / 仅明细无支付 {rec[4]}）")
+    print(f"    净差 {rec[5]:,.2f}，其中真·金额差异 {rec[6]:,.2f}"
+          f"（占有效 GMV {float(rec[6]) * 100.0 / float(gmv):.4f}%）")
+    print(f"    口径切换：全量 {rec[0]:,} 单 · 一致率 {rec[1] * 100.0 / rec[0]:.2f}%"
+          f"  →  剔除 unavailable/canceled {rec[7]:,} 单后 {rec[8]:,} 单 · "
+          f"一致率 {rec[9] * 100.0 / rec[8]:.2f}% · 净差 {rec[10]:,.2f}")
+
 
 def report_reconciliation(engine) -> int:
     """
@@ -204,7 +286,7 @@ def _rebuild_files(files, title: str) -> int:
 
 
 def rebuild() -> int:
-    """全量重建全部 ADS 对象（7 张表 + 5 个视图）并做对账"""
+    """全量重建全部 ADS 对象（9 张表 + 5 个视图）并做对账"""
     return _rebuild_files(ADS_FILES, "ADS 层构建（全量）")
 
 

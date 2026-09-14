@@ -46,13 +46,14 @@ FROM (
 
 OBJECTS = [
     # DWD
-    "dwd_order_detail", "dwd_order",
+    "dwd_order_detail", "dwd_order", "dwd_order_payment",
     # DWS
     "dws_sale_daily", "dws_sale_daily_seller", "dws_sale_daily_product",
     # ADS（表 + 视图，全都要验）
     "ads_sale_overview_daily", "ads_top_product", "ads_top_seller",
     "ads_user_retention", "ads_user_repeat_overall", "ads_user_repeat_monthly",
     "ads_fulfillment_monthly",
+    "ads_payment_reconcile", "ads_payment_reconcile_daily",
     "v_sale_daily_category", "v_sale_daily_seller_state", "v_sale_daily_buyer_state",
     "v_fulfillment_funnel", "v_retention_curve",
 ]
