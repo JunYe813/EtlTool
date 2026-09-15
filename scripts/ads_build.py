@@ -100,20 +100,18 @@ CONSISTENCY_CHECKS = [
         ],
     ),
     # ---------- 支付对账（P1-1）----------
-    # 前两条是「跨层兜底」：对账表一旦静默丢行，总额立刻对不上。
+    # 这几条是「跨层兜底」：对账表一旦静默丢行，总额立刻对不上。
     # 注意这里比的是**全量**口径（不筛 is_valid），因为对账的对象是全部 99,441 单。
+    #
+    # ⚠️ 「对账表支付额 = 支付表合计」那条**不在**这里，它在 COMPLETENESS_CHECKS。
+    #    原因：它的另一端是**全量 ODS**，而数仓是增量累积的 —— 回放演示中途
+    #    拿只加载了几天的对账表去比两年的 ODS，必然误报。下面这条比的是
+    #    dwd_order_detail（DWD 层，和 ADS 同步增量），两端范围始终一致，才留在这里。
     (
-        "对账表覆盖全量订单（行数 = dwd_order 总行数）",
+        "对账表覆盖订单层全部行数（行数 = dwd_order 总行数）",
         [
             "SELECT COUNT(*) FROM ads_payment_reconcile",
             "SELECT COUNT(*) FROM dwd_order",
-        ],
-    ),
-    (
-        "对账表支付额 = 支付表合计（跨层兜底，证明没漏行）",
-        [
-            "SELECT ROUND(SUM(payments_amount), 2) FROM ads_payment_reconcile",
-            "SELECT ROUND(SUM(payment_value), 2) FROM olist_order_payments_dataset",
         ],
     ),
     (
@@ -155,33 +153,86 @@ CONSISTENCY_CHECKS = [
     ),
 ]
 
+# ---------------------------------------------------------------------------
+# 需要「数仓已完整加载」才成立的对账项 —— 拿数仓去和**全量 ODS** 做兜底比对。
+#
+# 为什么单独分出来：数仓是**增量累积**的。数据回放演示从零开始一天天攒，
+# 中途仓库是**故意不完整**的，这时拿它对全量 ODS 比总额只会误报
+# （对账表只有几天的数据，ODS 却是两年）。
+#
+# 所以只在「dwd_order 行数 = ODS 订单行数」时才启用这条 ——
+# 加载完整后它会自动恢复，不需要人工开关。
+# ---------------------------------------------------------------------------
+COMPLETENESS_CHECKS = [
+    (
+        "对账表支付额 = 支付表全量合计（跨层兜底，证明没漏行）",
+        [
+            "SELECT ROUND(SUM(payments_amount), 2) FROM ads_payment_reconcile",
+            "SELECT ROUND(SUM(payment_value), 2) FROM olist_order_payments_dataset",
+        ],
+    ),
+]
+
+
+def warehouse_is_complete(engine) -> bool:
+    """数仓是否已加载全部订单（数据回放演示中途会是 False）"""
+    return scalar(engine, "SELECT COUNT(*) FROM dwd_order") == \
+        scalar(engine, "SELECT COUNT(*) FROM olist_orders_dataset")
+
+
+def _n(value, default=0):
+    """
+    聚合结果兜底成 0。
+
+    ⚠️ 数仓只加载了**部分历史**时（数据回放演示从零累积），
+    `SUM()` / `ROUND(...)` / `SUM(...) FILTER (...)` 在没有匹配行时返回 **NULL**，
+    直接拿去格式化会抛：
+
+        TypeError: unsupported format string passed to NoneType.__format__
+
+    这个坑在"全量数据"下**永远看不到**，只有从零累积的初始阶段才暴露 ——
+    本项目实测就是这样：跑了一整年全量都没事，做回放演示第一天就炸。
+    """
+    return default if value is None else value
+
 
 def print_snapshot(engine) -> None:
-    """打印关键指标快照，供人工核对合理性"""
+    """
+    打印关键指标快照，供人工核对合理性。
+
+    全程对「空表 / NULL」兜底（见 `_n()` 的说明）—— 因为数仓在增量累积的
+    中途本来就可能只有几天数据，这个函数不该因此崩掉。
+    """
     print("\n【指标快照】")
     rows = fetch_all(engine, """
         SELECT
             MIN(purchase_date), MAX(purchase_date), COUNT(*),
-            ROUND(SUM(gmv), 2), SUM(order_cnt), SUM(item_cnt),
-            ROUND(SUM(gmv) / NULLIF(SUM(order_cnt), 0), 2)
+            COALESCE(ROUND(SUM(gmv), 2), 0),
+            COALESCE(SUM(order_cnt), 0),
+            COALESCE(SUM(item_cnt), 0),
+            COALESCE(ROUND(SUM(gmv) / NULLIF(SUM(order_cnt), 0), 2), 0)
         FROM ads_sale_overview_daily
     """)
     first, last, days, gmv, orders, items, aov = rows[0]
     # 买家总数不能从日表 SUM(buyer_cnt) 拿：跨天复购的买家每天各被计一次，
     # 实测 SUM 得 97272，而真实去重买家是 94986（2064 个买家在多天购买）。
     # 去重买家总数只认 ads_user_repeat_overall（全周期按 customer_unique_id 去重）。
-    buyers = scalar(engine, "SELECT buyer_cnt FROM ads_user_repeat_overall")
+    buyers = _n(scalar(engine, "SELECT buyer_cnt FROM ads_user_repeat_overall"))
+    day_buyers = _n(scalar(engine, "SELECT SUM(buyer_cnt) FROM ads_sale_overview_daily"))
     print(f"  销售总览：{first} ~ {last}，共 {days} 天")
     print(f"    GMV = {gmv:,.2f}   有效订单 = {orders:,}   明细行 = {items:,}   客单价 = {aov}")
-    print(f"    去重买家 = {buyers:,}（注意：日表 SUM(buyer_cnt) = "
-          f"{scalar(engine, 'SELECT SUM(buyer_cnt) FROM ads_sale_overview_daily'):,}"
+    print(f"    去重买家 = {buyers:,}（注意：日表 SUM(buyer_cnt) = {day_buyers:,}"
           f"，含跨天复购重复计数，不可当买家总数用）")
 
-    rep = fetch_all(engine, """
+    rep_rows = fetch_all(engine, """
         SELECT buyer_cnt, repeat_buyer_cnt, repeat_rate, orders_per_buyer
         FROM ads_user_repeat_overall
-    """)[0]
-    print(f"  用户复购：买家 {rep[0]:,}，复购 {rep[1]:,}，复购率 {rep[2]}，人均 {rep[3]} 单")
+    """)
+    if rep_rows:
+        rep = [_n(v) for v in rep_rows[0]]
+        print(f"  用户复购：买家 {rep[0]:,}，复购 {rep[1]:,}，复购率 {rep[2]}，人均 {rep[3]} 单")
+    else:
+        print("  用户复购：（ads_user_repeat_overall 为空 —— 数仓只加载了部分历史时属正常）")
 
     print("  留存率（已剔除右删失 cohort 与 cohort_size < 20 的小样本）：")
     for window, cohort_n, rate in fetch_all(engine, """
@@ -198,29 +249,34 @@ def print_snapshot(engine) -> None:
 
     # 平均履约时长必须按签收单量加权：直接 AVG(月度均值) 是「均值的均值」，
     # 实测会得到 14.31，而真实值是 12.50（小月份被赋予了和 1 月同样的权重）。
-    fun = fetch_all(engine, """
-        SELECT SUM(order_cnt), SUM(approved_cnt), SUM(shipped_cnt), SUM(delivered_cnt),
+    fun_rows = fetch_all(engine, """
+        SELECT COALESCE(SUM(order_cnt), 0), COALESCE(SUM(approved_cnt), 0),
+               COALESCE(SUM(shipped_cnt), 0), COALESCE(SUM(delivered_cnt), 0),
                ROUND(SUM(avg_deliver_days * delivered_cnt) / NULLIF(SUM(delivered_cnt), 0), 2)
         FROM ads_fulfillment_monthly
-    """)[0]
-    print(f"  履约漏斗（全量）：下单 {fun[0]:,} → 审批 {fun[1]:,} → 交承运 {fun[2]:,} → 签收 {fun[3]:,}"
-          f"，平均签收 {fun[4]} 天（按签收单量加权）")
+    """)
+    if fun_rows:
+        fun = [_n(v) for v in fun_rows[0]]
+        print(f"  履约漏斗（全量）：下单 {fun[0]:,} → 审批 {fun[1]:,} → 交承运 {fun[2]:,}"
+              f" → 签收 {fun[3]:,}，平均签收 {fun[4]} 天（按签收单量加权）")
+    else:
+        print("  履约漏斗：（ads_fulfillment_monthly 为空）")
 
-    cats = scalar(engine, "SELECT COUNT(DISTINCT category_name) FROM v_sale_daily_category")
-    sellers = scalar(engine, "SELECT COUNT(*) FROM ads_top_seller")
-    states = scalar(engine, "SELECT COUNT(DISTINCT seller_state) FROM v_sale_daily_seller_state")
+    cats = _n(scalar(engine, "SELECT COUNT(DISTINCT category_name) FROM v_sale_daily_category"))
+    sellers = _n(scalar(engine, "SELECT COUNT(*) FROM ads_top_seller"))
+    states = _n(scalar(engine, "SELECT COUNT(DISTINCT seller_state) FROM v_sale_daily_seller_state"))
     print(f"  维度：类目 {cats} 个（有有效订单的）卖家 {sellers:,} 个，卖家州 {states} 个")
 
     unknown = scalar(engine, """
         SELECT ROUND(SUM(gmv) * 100.0 / (SELECT SUM(gmv) FROM dws_sale_daily), 2)
         FROM dws_sale_daily WHERE category_name = 'unknown'
     """)
-    print(f"  数据质量：类目 'unknown' 的 GMV 占比 {unknown}%")
+    print(f"  数据质量：类目 'unknown' 的 GMV 占比 {_n(unknown)}%")
 
     # 支付对账（P1-1）：净差 16.5 万里 98.4% 是「有支付、无明细」的口径问题，
-    # 不是金额错误 —— 那 767 笔里 767 单是 unavailable/canceled，本就不该有明细行。
-    # 剔除后真·金额差异只剩 301 笔 / 3,609.98 元。看板据此做口径切换。
-    rec = fetch_all(engine, """
+    # 不是金额错误 —— 那 767 笔是 unavailable/canceled，本就不该有明细行。
+    # 剔除后真·金额差异只剩 303 笔 / 2,871.06。看板据此做口径切换。
+    rec_rows = fetch_all(engine, """
         SELECT COUNT(*),
                COUNT(*) FILTER (WHERE diff_type = '一致'),
                COUNT(*) FILTER (WHERE diff_type = '金额不符'),
@@ -233,15 +289,25 @@ def print_snapshot(engine) -> None:
                COUNT(*) FILTER (WHERE is_comparable AND diff_type = '一致'),
                ROUND(SUM(diff_amount) FILTER (WHERE is_comparable), 2)
         FROM ads_payment_reconcile
-    """)[0]
+    """)
+    rec = [_n(v) for v in rec_rows[0]] if rec_rows else [0] * 11
+
+    total, matched = rec[0], rec[1]
     diff_n = rec[2] + rec[3] + rec[4]
-    print(f"  支付对账：参与 {rec[0]:,} 单，一致 {rec[1]:,}，差异 {diff_n:,} 笔"
+    net_diff, amt_diff = rec[5], rec[6]
+    cmp_total, cmp_matched, cmp_net = rec[8], rec[9], rec[10]
+    # 分母为 0 时不求百分比（数仓刚清空、还没有任何对账行）
+    pct_of_gmv = (float(amt_diff) * 100.0 / float(gmv)) if gmv else 0.0
+    rate_all = (matched * 100.0 / total) if total else 0.0
+    rate_cmp = (cmp_matched * 100.0 / cmp_total) if cmp_total else 0.0
+
+    print(f"  支付对账：参与 {total:,} 单，一致 {matched:,}，差异 {diff_n:,} 笔"
           f"（金额不符 {rec[2]} / 仅支付无明细 {rec[3]} / 仅明细无支付 {rec[4]}）")
-    print(f"    净差 {rec[5]:,.2f}，其中真·金额差异 {rec[6]:,.2f}"
-          f"（占有效 GMV {float(rec[6]) * 100.0 / float(gmv):.4f}%）")
-    print(f"    口径切换：全量 {rec[0]:,} 单 · 一致率 {rec[1] * 100.0 / rec[0]:.2f}%"
-          f"  →  剔除 unavailable/canceled {rec[7]:,} 单后 {rec[8]:,} 单 · "
-          f"一致率 {rec[9] * 100.0 / rec[8]:.2f}% · 净差 {rec[10]:,.2f}")
+    print(f"    净差 {net_diff:,.2f}，其中真·金额差异 {amt_diff:,.2f}"
+          f"（占有效 GMV {pct_of_gmv:.4f}%）")
+    print(f"    口径切换：全量 {total:,} 单 · 一致率 {rate_all:.2f}%"
+          f"  →  剔除 unavailable/canceled {rec[7]:,} 单后 {cmp_total:,} 单 · "
+          f"一致率 {rate_cmp:.2f}% · 净差 {cmp_net:,.2f}")
 
 
 def report_reconciliation(engine) -> int:
@@ -250,11 +316,22 @@ def report_reconciliation(engine) -> int:
 
     抽成独立函数的原因：**全量重建和增量装载两条路径都要跑对账** ——
     否则增量模式就没有任何校验了。
+
+    「对全量 ODS 兜底」那类对账项只在数仓已完整加载时才跑，
+    见 COMPLETENESS_CHECKS 的说明 —— 数据回放演示中途仓库是故意不完整的。
     """
     print("\n【一致性对账】")
+    checks = list(CONSISTENCY_CHECKS)
+    if warehouse_is_complete(engine):
+        checks += COMPLETENESS_CHECKS
+    else:
+        print(f"  [SKIP] 数仓尚未加载全部历史，跳过 {len(COMPLETENESS_CHECKS)} 条"
+              f"「对全量 ODS 兜底」的对账项")
+        print("         （数据回放演示中途属预期；加载完整后会自动恢复）")
+
     all_ok = all(
         check_consistency(engine, label, sqls)
-        for label, sqls in CONSISTENCY_CHECKS
+        for label, sqls in checks
     )
 
     print_snapshot(engine)
