@@ -65,6 +65,36 @@ sudo systemctl restart airflow-webserver
 journalctl -u airflow-scheduler -n 100 --no-pager      # scheduler 日志
 ```
 
+### ⚠️ 改完代码后要做什么 —— 别靠猜
+
+Airflow 的组件**各自缓存自己的状态**，「文件改了」不等于「生效了」。
+这张表是实测总结，按它做就不用每次推断：
+
+| 改了什么 | 要做什么 | 为什么 |
+|---|---|---|
+| `dags/*.py`（DAG 定义、`SCHEDULE`、`max_active_runs`、`retries`…） | 等约 30 秒，调度器自己重新解析 | DAG 解析器盯着 DAG 文件的 mtime |
+| **`replay_config.py`**（`REPLAY_EPOCH` / `REPLAY_UNIT_SECONDS`） | **`sudo systemctl restart airflow-scheduler`** | 这个文件不在 `dags/` 下，解析器不盯它；而且已加载的模块可能被缓存 |
+| `scripts/*.py`（ETL 逻辑） | **什么都不用做** | 每个 task 在独立子进程里重新 import |
+| `~/airflow/airflow.env` | **`sudo systemctl restart airflow-scheduler airflow-webserver`** | 两个服务都在启动时读 `EnvironmentFile`，之后不再重读 |
+| `airflow.cfg` | 同上 | 同上 |
+| **只是 UI 显示不对 / 数据没更新** | **浏览器 `Ctrl+Shift+R` 强刷** | 实测踩过：页面显示 `No results`，强刷后就正常，服务本身没问题 |
+
+**「改了但没生效」的三种典型症状**（都实测遇到过）：
+
+1. `REPLAY_EPOCH` 改了，但 run 还按旧 epoch 算 → 忘了重启调度器
+2. `SCHEDULE` 改了，但调度频率没变 → 同上
+3. **UI 显示 `No results`，而 CLI `airflow dags list-runs` 一切正常** → 先强刷浏览器；
+   仍不行再查 `serialized_dag` 表有没有内容（`SELECT COUNT(*) FROM serialized_dag;`），
+   以及 webserver 和 scheduler 的 `AIRFLOW_HOME` 是不是同一个
+
+> **排错时最先看的三处**（避开今天绕过的弯路）：
+> ① `SELECT filename, LEFT(stacktrace, 500) FROM import_error;` —— DAG 是否解析失败
+> ② `SELECT dag_id, is_paused, max_active_runs, next_dagrun, next_dagrun_create_after FROM dag;`
+> ③ `airflow dags list-runs -d olist_warehouse_daily` —— run 的真实状态
+>
+> 元数据库的**权威性高于任何 CLI 的打印**：`check_dag.py` 用的是桩模块，
+> 只是回显 DAG 参数，证明不了 Airflow 实际取到的值。
+
 ### DAG
 
 > ⚠️ **命令一律用绝对路径 `/opt/airflow-venv/bin/airflow`** —— venv 激活只对当前 shell 有效，
