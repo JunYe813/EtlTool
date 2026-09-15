@@ -158,16 +158,42 @@ def report_rows(engine: Engine, objects) -> None:
             print(f"       - {name}: 行数读取失败 ({type(exc).__name__})")
 
 
+def _norm_zero(v):
+    """
+    把聚合结果的 NULL 归一成 0 —— **只在比较时用**。
+
+    为什么必须做：SQL 里 `SUM()` 作用在**空集合**上返回 NULL，而不是 0；
+    但这个校验场景的语义是「没有数据 = 0」。不归一就会出现：
+
+        [FAIL] 买家口径一致（留存 cohort 规模合计 = 复购买家数）: None == 0
+
+    因为 `ads_user_retention` 在空库时是空表（→ NULL），而
+    `ads_user_repeat_overall` 一定会写入一行（→ 0）。两者语义相同却判为不一致。
+
+    ⚠️ 这个坑**只在数仓完全为空时触发** —— 即数据回放演示
+    `demo_replay.py reset --yes` 之后的第一次运行、且目标购买日恰好没有订单时。
+    平时库里有数据就碰不到，所以隐蔽性很强：它会让第一个 run 失败、
+    连带 `max_active_runs=1` 把整个 DAG 冻结，而看板上只看得到"没数据"。
+    """
+    return 0 if v is None else v
+
+
 def check_consistency(engine: Engine, label: str, sqls) -> bool:
     """
     一致性校验：把多条 SQL 的结果互相比对（不硬编码期望值）。
 
     硬编码 13494400.74 这类常量在数据变动后会失效；
     比对"同一口径的不同算法是否互相吻合"才是真正有意义的对账。
+
+    比较前把 NULL 归一成 0（见 `_norm_zero`）—— 空集合的 `SUM()` 是 NULL，
+    语义上就是 0，不该被判成不一致。
     """
-    values = [scalar(engine, s) for s in sqls]
+    raw = [scalar(engine, s) for s in sqls]
+    values = [_norm_zero(v) for v in raw]
     ok = len({str(v) for v in values}) == 1
     mark = "[OK]  " if ok else "[FAIL]"
     joined = " == ".join(str(v) for v in values)
-    print(f"  {mark} {label}: {joined}")
+    # 归一化发生过就点明，避免把"空表"悄悄显示成有意义的 0
+    note = "" if raw == values else "   （NULL 已按 0 比较）"
+    print(f"  {mark} {label}: {joined}{note}")
     return ok

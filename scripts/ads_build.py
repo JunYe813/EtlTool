@@ -219,7 +219,9 @@ def print_snapshot(engine) -> None:
     # 去重买家总数只认 ads_user_repeat_overall（全周期按 customer_unique_id 去重）。
     buyers = _n(scalar(engine, "SELECT buyer_cnt FROM ads_user_repeat_overall"))
     day_buyers = _n(scalar(engine, "SELECT SUM(buyer_cnt) FROM ads_sale_overview_daily"))
-    print(f"  销售总览：{first} ~ {last}，共 {days} 天")
+    # 空库时 MIN/MAX 都是 NULL，直接打印会得到「None ~ None」，看着像坏了
+    span = "（尚无数据）" if first is None else f"{first} ~ {last}，共 {_n(days)} 天"
+    print(f"  销售总览：{span}")
     print(f"    GMV = {gmv:,.2f}   有效订单 = {orders:,}   明细行 = {items:,}   客单价 = {aov}")
     print(f"    去重买家 = {buyers:,}（注意：日表 SUM(buyer_cnt) = {day_buyers:,}"
           f"，含跨天复购重复计数，不可当买家总数用）")
