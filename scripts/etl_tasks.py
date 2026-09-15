@@ -100,7 +100,14 @@ REPLAY_UNIT_SECONDS = int(os.environ.get("OLIST_REPLAY_UNIT_SECONDS", "86400"))
 
 
 def _as_utc(ts) -> datetime:
-    """date 或（可能不带时区的）datetime → 带 UTC 时区的 datetime"""
+    """
+    str / date / datetime → 带 UTC 时区的 datetime。
+
+    接受字符串是因为配置通常写成文本（`replay_config.REPLAY_EPOCH`
+    和 `OLIST_REPLAY_EPOCH` 都是字符串），调用方不该被迫先转换一遍。
+    """
+    if isinstance(ts, str):
+        ts = _parse_epoch(ts)          # '2026-09-15' 或 '2026-09-15T06:36:00'
     if isinstance(ts, datetime):
         return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
     return datetime(ts.year, ts.month, ts.day, tzinfo=timezone.utc)

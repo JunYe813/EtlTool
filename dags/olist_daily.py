@@ -33,22 +33,29 @@ Olist 四层数仓 · 每日增量 DAG
    映射是**纯函数**（不依赖任何存储的游标）：同一个 logical date 永远映射到同一天，
    所以重跑那次调度结果一致，幂等性不受影响。
 
-   配置（都在 ~/airflow/airflow.env）：
-       OLIST_RUN_MODE=replay             # replay（默认，映射到历史）/ real（用真实日期）
-       OLIST_REPLAY_EPOCH=2026-09-15     # 回放起点：真实时间从这天 00:00Z 算 offset 0
-       OLIST_REPLAY_UNIT_SECONDS=86400   # 步长：真实时间每过多少秒，数据时间推进一天
-       OLIST_SCHEDULE='0 2 * * *'        # 调度周期（**含空格必须加引号**）
+   配置在 **`replay_config.py`**（项目根目录）—— 写进代码，不走环境变量：
+       RUN_MODE              = "replay"              # replay / real
+       REPLAY_EPOCH          = "2026-09-15T06:36:00" # 第 0 天对应的真实时刻
+       REPLAY_UNIT_SECONDS   = 120                   # 真实时间每多少秒推进一天
+       SCHEDULE              = "0 0/2 * * * *"       # 调度周期
+
+   为什么不用环境变量：环境变量要经 systemd 的 `EnvironmentFile` 传到调度器进程，
+   而 CLI 走的是 shell 环境 —— 两条路径读到的不是一份配置，再加上 `airflow.cfg`
+   里还有一份首次生成的旧默认值，就是"三个来源互相覆盖"。
+   实测症状：**手动触发能跑通、自动调度不跑**，而且极难查。
+   写进代码后改完 `git pull` 就生效（调度器自动重新解析 DAG），不用重启服务。
 
    ⚠️ 步长和调度周期必须匹配。演示时想快点推进，两个一起改：
 
-       正式：OLIST_REPLAY_UNIT_SECONDS=86400  +  OLIST_SCHEDULE='0 2 * * *'
-       快速：OLIST_REPLAY_UNIT_SECONDS=120    +  OLIST_SCHEDULE='*/2 * * * *'
+       正式：REPLAY_UNIT_SECONDS = 86400  +  SCHEDULE = "0 2 * * *"
+       演示：REPLAY_UNIT_SECONDS = 120    +  SCHEDULE = "0 0/2 * * * *"
 
    只改调度不改步长的话，同一天内的多次运行会算出同一个 offset ——
    反复处理同一天，**看起来像"回放不推进"**。
+   跑 `python scripts/demo_replay.py preview` 可以一次验证两者是否匹配。
 
    两种用法都支持，互不冲突：
-       ① 让它每天自动推进一天      —— 起 scheduler 就行，什么都不用敲
+       ① 让它按周期自动推进      —— 起 scheduler 就行，什么都不用敲
        ② 一次性回补历史（补数场景） —— airflow dags backfill
           ⚠️ 回补时 --end-date 不含当天（调度点是 02:00，而它被解析成 00:00），
              末尾要多给一天，跑完用 dag_run 的 COUNT 核对天数。
@@ -57,7 +64,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 # 项目根目录：调度器的工作目录不一定是项目目录，所以要显式 bootstrap sys.path
@@ -69,27 +76,28 @@ for _p in (str(PROJECT_ROOT / "scripts"), str(PROJECT_ROOT)):
 from airflow import DAG                                    # noqa: E402
 from airflow.operators.python import PythonOperator        # noqa: E402
 
+import replay_config                                       # noqa: E402  (项目根目录)
 from etl_tasks import (                                    # noqa: E402
     LAYERS, advance_watermark, check_prerequisites, resolve_target,
     run_full_only, run_layer, run_quality_gate, window,
 )
 
-LOOKBACK_DAYS = int(os.environ.get("OLIST_LOOKBACK_DAYS", "3"))
+LOOKBACK_DAYS = 3
 
-# 数据实际跨度（见 docs/数据字典.md 第九节）
-DATA_START = datetime(2016, 9, 4)
-DATA_END = datetime(2018, 10, 17)
+# ---- 回放 / 调度配置全部来自 replay_config.py -------------------------------
+# 为什么不从环境变量读：环境变量要经 systemd 的 EnvironmentFile 传到调度器，
+# 而 CLI 走的是 shell 环境 —— 两条路径读到的不是一份配置，再叠加 airflow.cfg 里
+# 一份首次生成的旧默认值，就是"三个来源互相覆盖"。写进代码没有这个问题，
+# 而且改完 git pull 就生效（调度器自动重新解析），不用重启服务。
+RUN_MODE = replay_config.RUN_MODE.strip().lower()
+SCHEDULE = replay_config.SCHEDULE
 
-# 回放模式：把「真实日期」映射到「数据区间里的某一天」，见文件顶部说明
-RUN_MODE = os.environ.get("OLIST_RUN_MODE", "replay").strip().lower()
-
-# 调度周期。
-#   正式演示：0 2 * * *     每天 02:00 推进一天
-#   快速演示：*/2 * * * *   想几分钟看完多天推进时改密一些（见 docs/Airflow使用手册.md）
-SCHEDULE = os.environ.get("OLIST_SCHEDULE", "0 2 * * *")
-
-# real 模式下数据区间有界，给 end_date；回放模式要一直跑下去（循环回放），不能设
-END_DATE = DATA_END if RUN_MODE == "real" else None
+# ⚠️ end_date 固定为 None —— **不要**在这里设 DAG 结束日期。
+#    Airflow 一旦认为 DAG 已过 end_date，就再也不创建新 run，表现为
+#    `dag.next_dagrun_create_after` 为 NULL、"跑完一次就没后续"，而且不报错。
+#    代价：RUN_MODE="real" 时没有数据的日子也会空跑 —— 但空跑是看得见的，
+#    静默不再调度是看不见的。宁可空跑。
+END_DATE = None
 
 default_args = {
     "owner": "wujunye",
@@ -133,11 +141,19 @@ def _target(**context) -> date:
 
     用 `logical_date`（带时区的 datetime）而不是 `ds`（只有日期）——
     回放步长按**秒**算，需要时间粒度才能支持「2 分钟推一天」这类密集演示调度。
+
+    ⚠️ 回放参数**显式传进去**（来自 replay_config.py），不依赖
+    `etl_tasks` 模块级那个环境变量默认值 —— 环境变量在 systemd 那条路径上不可靠。
     """
     logical = context["logical_date"]
     if not _should_replay(context):
         return logical.date()
-    target = resolve_target(logical, mode="replay")
+    target = resolve_target(
+        logical,
+        mode=RUN_MODE,
+        epoch=replay_config.REPLAY_EPOCH,
+        unit_seconds=replay_config.REPLAY_UNIT_SECONDS,
+    )
     print(f"[回放模式] logical date {logical} → 实际处理的购买日 {target}")
     return target
 

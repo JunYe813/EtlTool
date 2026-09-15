@@ -39,6 +39,9 @@ if str(ROOT) not in sys.path:
 
 from sql_runner import execute_script, fetch_all, get_engine      # noqa: E402
 
+# 回放配置的唯一来源 —— 和 DAG 读的是同一份（项目根目录的 replay_config.py）
+import replay_config                                              # noqa: E402
+
 # 表清单从 check_idempotent 的 LAYER_OBJECTS 派生（剔掉视图）——
 # 这样新增对象时只要同步那一处，这份脚本自动跟着走，不会漏。
 from check_idempotent import LAYER_OBJECTS                        # noqa: E402
@@ -205,11 +208,13 @@ def show_preview(interval_arg=None, steps: int = 6) -> int:
         interval <  unit   → [FAIL] 同一天内多次运行算出同一个目标日 → 反复处理同一天
         interval >  unit   → [WARN] 每次跳好几天 → 会跳过一些日子
     """
-    from etl_tasks import (DATA_END, DATA_START, REPLAY_EPOCH,
-                           REPLAY_UNIT_SECONDS, RUN_MODE, resolve_target)
+    from etl_tasks import DATA_END, DATA_SPAN, DATA_START, resolve_target
 
-    unit = REPLAY_UNIT_SECONDS
-    schedule = os.environ.get("OLIST_SCHEDULE")
+    # 配置全部来自 replay_config.py —— 和 DAG 同一份，不用 source 环境变量
+    unit = replay_config.REPLAY_UNIT_SECONDS
+    schedule = replay_config.SCHEDULE
+    run_mode = replay_config.RUN_MODE
+    epoch = replay_config.REPLAY_EPOCH
     guessed = _guess_interval_seconds(schedule)
 
     def human(sec):
@@ -218,21 +223,21 @@ def show_preview(interval_arg=None, steps: int = 6) -> int:
         return f"{sec / 60:.0f} 分钟" if sec >= 60 else f"{sec} 秒"
 
     print("=" * 72)
-    print("回放映射预览")
+    print("回放映射预览（配置来自 replay_config.py，和 DAG 同一份）")
     print("=" * 72)
-    print(f"  OLIST_RUN_MODE            = {RUN_MODE}")
-    print(f"  OLIST_REPLAY_EPOCH        = {REPLAY_EPOCH}")
-    print(f"  OLIST_REPLAY_UNIT_SECONDS = {unit}  →  真实时间每 {human(unit)} 推进一天")
-    print(f"  OLIST_SCHEDULE            = {schedule or '(未设置，DAG 内默认 0 2 * * *)'}")
+    print(f"  RUN_MODE                  = {run_mode}")
+    print(f"  REPLAY_EPOCH              = {epoch}")
+    print(f"  REPLAY_UNIT_SECONDS       = {unit}  →  真实时间每 {human(unit)} 推进一天")
+    print(f"  SCHEDULE                  = {schedule}")
     print(f"  数据区间                   {DATA_START} ~ {DATA_END}")
 
-    if RUN_MODE != "replay":
+    if run_mode.strip().lower() != "replay":
         print("\n  当前不是 replay 模式，回放映射不生效（直接用真实日期）。")
         return 0
 
     interval = interval_arg or guessed
     src = ("--interval 指定" if interval_arg else
-           "从 OLIST_SCHEDULE 推断" if guessed else
+           "从 SCHEDULE 推断" if guessed else
            "推断失败，退回用步长 —— 结果仅供参考，请用 --interval 显式指定")
     print(f"\n  调度间隔 ≈ {human(interval)}（{src}）")
 
@@ -243,32 +248,35 @@ def show_preview(interval_arg=None, steps: int = 6) -> int:
             print(f"  [FAIL] 调度间隔({human(interval)}) < 步长({human(unit)})")
             print(f"         后果：要过 {unit / interval:.0f} 次运行目标日才前进 1 天 ——")
             print("               在那之前每次都反复处理同一天，看起来像「回放不推进」。")
-            print(f"         修法：OLIST_REPLAY_UNIT_SECONDS={int(interval)}")
+            print(f"         修法：把 replay_config.py 的 REPLAY_UNIT_SECONDS 改成 {int(interval)}")
         else:
             print(f"  [WARN] 调度间隔({human(interval)}) > 步长({human(unit)})")
             print(f"         后果：每次跳 {interval / unit:.0f} 天，会跳过一些日子。")
-            print(f"         修法：OLIST_REPLAY_UNIT_SECONDS={int(interval)}")
+            print(f"         修法：把 replay_config.py 的 REPLAY_UNIT_SECONDS 改成 {int(interval)}")
 
     # ---- 可视化：在调度节奏上探测 ----
     probe = interval or unit
     base = datetime.now(timezone.utc).replace(second=0, microsecond=0)
 
-    # 提示：当前 offset 走到哪了。epoch 落在午夜时，白天启动演示会"从中间开始"。
-    from etl_tasks import DATA_SPAN
-    cur = resolve_target(base)
+    def rt(ts):
+        """用**配置文件里的**参数算映射（不依赖 etl_tasks 的环境变量默认值）"""
+        return resolve_target(ts, mode=run_mode, epoch=epoch, unit_seconds=unit)
+
+    cur = rt(base)
     cur_offset = (cur - DATA_START).days
     print(f"\n  当前时刻对应的回放进度：第 {cur_offset} 天（{cur}）")
     if cur_offset > 3:
         suggested = base.strftime("%Y-%m-%dT%H:%M:%S")
-        print(f"  想让它从第 0 天（{DATA_START}）开始，就把 epoch 设到「现在」附近"
-              f"（支持带时间）：")
-        print(f"      OLIST_REPLAY_EPOCH='{suggested}'")
+        print(f"  想让它从第 0 天（{DATA_START}）开始，就把 replay_config.py 里的")
+        print(f"  REPLAY_EPOCH 改成「现在」附近（支持带时间）：")
+        print(f"      REPLAY_EPOCH = \"{suggested}\"")
+        print(f"  然后跑 python scripts/demo_replay.py reset --yes 清空数仓重新累积。")
 
     print(f"\n  按调度节奏探测 {steps} 次（每次间隔 {human(probe)}）：")
     results = []
     for k in range(steps):
         t = base + timedelta(seconds=probe * k)
-        target = resolve_target(t)
+        target = rt(t)
         results.append(target)
         print(f"    {t:%Y-%m-%d %H:%M}Z  →  {target}")
 
@@ -278,12 +286,12 @@ def show_preview(interval_arg=None, steps: int = 6) -> int:
 
     print()
     if interval and interval == unit:
-        print(f"  [OK] 步长与调度周期匹配 —— 每次运行推进 1 天")
+        print("  [OK] 步长与调度周期匹配 —— 每次运行推进 1 天")
     elif advanced == 0 and not wrapped:
         print("  [FAIL] 探测期间目标日**完全没推进** —— 就是上面那个问题")
     else:
-        print(f"  [OK] 映射在推进（探测期间共前进 {advanced} 天"
-              + "，期间绕回过区间开头，属预期）" if wrapped else "）")
+        tail = "，期间绕回过区间开头，属预期）" if wrapped else "）"
+        print(f"  [OK] 映射在推进（探测期间共前进 {advanced} 天{tail}")
     print("=" * 72)
     return 0 if (interval == unit or advanced > 0 or wrapped) else 1
 
