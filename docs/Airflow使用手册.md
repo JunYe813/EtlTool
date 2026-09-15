@@ -242,29 +242,66 @@ SCHEDULE            = "0 0/2 * * * *"   # 每 2 分钟跑一次
 | ✅ | **流水线每天稳定运转** + 每次覆盖后指纹不变（幂等性的现场证明） |
 | ❌ | ~~数据从无到有地累积~~ |
 
-**想看到"数据一天天堆起来"，必须先清空数仓。** 用现成的工具：
+**想看到"数据一天天堆起来"，必须先清空数仓。** 完整流程（**顺序不能换**）：
 
 ```bash
-python scripts/demo_replay.py status      # 看当前进度（覆盖天数、水位线、完整度）
-python scripts/demo_replay.py reset --yes # 清空 DWD/DWS/ADS + 重置水位线
-python scripts/demo_replay.py restore     # 全量重建，恢复完整数据
+cd /opt/etl_data
+
+# 1) 停调度器 —— 否则重置期间可能有 run 正在写
+sudo systemctl stop airflow-scheduler
+
+# 2) 把回放起点对准「现在」（用命令而非手敲时间戳，免得写错时区/格式）
+python3 - <<'PY'
+import re, pathlib
+from datetime import datetime, timezone
+p = pathlib.Path("replay_config.py")
+s = p.read_text(encoding="utf-8")
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+new, n = re.subn(r'(?m)^REPLAY_EPOCH\s*=\s*"[^"]*"',
+                 f'REPLAY_EPOCH = "{now}"', s)
+assert n == 1, f"没匹配到 REPLAY_EPOCH（匹配数={n}）"
+p.write_text(new, encoding="utf-8")
+print("REPLAY_EPOCH 已对准", now, "(UTC)")
+PY
+
+# 3) 清空 DWD/DWS/ADS + 重置水位线（ODS 源数据一行不动）
+/opt/airflow-venv/bin/python scripts/demo_replay.py reset --yes
+
+# 4) 起调度器
+sudo systemctl start airflow-scheduler
+
+# 5) 盯住：2 分钟内应出现新 run，且 6 个 task 全 success
+/opt/airflow-venv/bin/airflow dags list-runs -d olist_warehouse_daily
+/opt/airflow-venv/bin/python scripts/demo_replay.py status
 ```
 
 **★ 安全性**：`reset` **只清 DWD/DWS/ADS，ODS 源数据一行不动**。
 而 DWD 是从 ODS 推出来的，所以 `restore` 能在 10 秒内恢复全量。
 **「清空」是一次可撤销的实验，不是有风险的操作。**
 
-清空后的期望：
+**演示完还原**（第 2 步让 `replay_config.py` 变「脏」了，要还原）：
 
-| 时间 | 数仓里 |
-|---|---|
-| 第 1 个 run 后 | `2016-09-04` 一天 |
-| 第 10 个 run 后 | 约 13 天（回看窗口也覆盖了前面的日子） |
-| … | 一天天累积，水位线跟着推进，**看板上的 GMV/订单数一天天变多** |
+```bash
+/opt/airflow-venv/bin/python scripts/demo_replay.py restore   # 数据恢复全量
+git checkout -- replay_config.py                             # epoch 还原成正式值
+```
 
-> **现实提醒**：从零走到全量要 **774 个 run** ——
-> 每天一天 = 约 2 年；2 分钟一天 = 约 26 小时。
-> **所以别期望回放到全量**，看前 20~50 天的累积过程就足够说明机制了。
+清空后的期望 —— ⚠️ **注意开头一大片是空的**：
+
+| 阶段 | 数仓里 | 说明 |
+|---|---|---|
+| 第 1 个 run 后 | `2016-09-04`，1 单 | offset 0 |
+| 前 ~40 个 run | 累计只有 14 天有数据 | **源数据 2016-09~10 本身稀疏**：61 个日历天里只有 14 天有订单 |
+| 走到 2016-11-01 | 约 330 单 | ~58 步 ≈ 2 小时 |
+| 2017-01 之后 | 每天 200~300 单 | 数据才开始"像样" |
+
+> **两条现实提醒：**
+>
+> 1. 从零走到全量要 **774 个 run** —— 2 分钟一天约 **26 小时**。
+>    **别期望回放到全量**，看前 20~50 天的累积过程就足够说明机制。
+> 2. **开头的空天是数据集性质，不是故障。** 已实测：空天跑完整六任务链
+>    六项全部 `[OK]`（含对账）—— 它处理的是"0 行"，而不是"出错"。
+>    这也顺带证明了流水线对上游迟到/断流是稳的。
 
 ### ③ 重置水位线（低层做法）
 

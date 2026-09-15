@@ -34,15 +34,35 @@ RUN_MODE = "replay"
 # ============================================================
 
 # 回放起点：真实时间从这一刻算「第 0 天」。
+#   offset = floor((now - epoch) / 步长)；offset 为负会**钳到 0**，停在 2016-09-04 不动。
 #
-# 想从数据开头（2016-09-04）重新演示：
-#   1. 把它设成"你启动前的那一刻"
-#   2. 跑 scripts/demo_replay.py reset --yes 清空数仓
-#   3. 重启服务
+# ★ 演示前必须重新「对准表」—— 把它设成**你启动前的那一刻**：
+#
+#     cd /opt/etl_data && python3 - <<'PY'
+#     import re, pathlib
+#     from datetime import datetime, timezone
+#     p = pathlib.Path("replay_config.py")
+#     s = p.read_text(encoding="utf-8")
+#     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+#     new, n = re.subn(r'(?m)^REPLAY_EPOCH\s*=\s*"[^"]*"',
+#                      f'REPLAY_EPOCH = "{now}"', s)
+#     assert n == 1, f"没匹配到 REPLAY_EPOCH（匹配数={n}）"
+#     p.write_text(new, encoding="utf-8")
+#     print("REPLAY_EPOCH 已对准", now, "(UTC)")
+#     PY
+#
+#   用命令而不是手敲，是为了避开时区/格式写错 —— 这个文件里踩过一次时间的坑。
+#   ⚠️ 这一步会让 replay_config.py 在工作区变「脏」；演示结束后
+#      `git checkout -- replay_config.py` 还原。
+#
+# 演示采用「从数据开头开始」（offset 0 = 2016-09-04）。注意源数据
+# 2016-09 ~ 2016-10 **非常稀疏**：61 个日历天里只有 14 天有订单，
+# 所以开头约 40 次运行大部分在处理**空天**。这是数据集本身的性质，
+# 不是流水线的问题 —— 而且已实测验证：空天不会让任何一层失败。
 #
 # 支持两种写法：
 #   '2026-09-15'            → 当天 00:00Z（粗粒度，白天启动会从区间中间开始）
-#   '2026-09-15T06:36:00'   → 精确到秒（推荐）
+#   '2026-09-15T06:36:00'   → 精确到秒（推荐，也是上面那条命令产出的格式）
 REPLAY_EPOCH = "2026-09-15T06:36:00"
 
 # 步长：真实时间每过这么多秒，数据时间推进一天。
