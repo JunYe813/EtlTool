@@ -64,7 +64,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # 项目根目录：调度器的工作目录不一定是项目目录，所以要显式 bootstrap sys.path
@@ -91,6 +91,13 @@ LOOKBACK_DAYS = 3
 # 而且改完 git pull 就生效（调度器自动重新解析），不用重启服务。
 RUN_MODE = replay_config.RUN_MODE.strip().lower()
 SCHEDULE = replay_config.SCHEDULE
+
+# DAG 的起始日期 —— Airflow 用它推第一个调度点。
+# 取数据集开始日：回放模式下 logical date 只用来算 offset，起点早一点不影响。
+# ⚠️ 必须在这里定义 —— 删掉它会让下面的 `start_date=DATA_START` 抛
+#    `NameError`，而 DAG 导入失败的症状是「调度器活着、dag 表 0 行、不报错」，
+#    极难定位。改完 DAG 一定跑 `python scripts/check_dag.py`（见那个脚本的说明）。
+DATA_START = datetime(2016, 9, 4)
 
 # ⚠️ end_date 固定为 None —— **不要**在这里设 DAG 结束日期。
 #    Airflow 一旦认为 DAG 已过 end_date，就再也不创建新 run，表现为

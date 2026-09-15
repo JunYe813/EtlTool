@@ -67,17 +67,24 @@ journalctl -u airflow-scheduler -n 100 --no-pager      # scheduler 日志
 
 ### DAG
 
+> ⚠️ **命令一律用绝对路径 `/opt/airflow-venv/bin/airflow`** —— venv 激活只对当前 shell 有效，
+> 重连或新开终端就没了，裸 `airflow` 会报 `command not found`。
+
 ```bash
-airflow dags list                                      # 列表（看 is_paused 列）
-airflow dags list-import-errors                        # ★ DAG 变红时第一个查这个
-airflow dags unpause olist_warehouse_daily             # 恢复调度
-airflow dags list-runs -d olist_warehouse_daily        # 历史运行
+# ★★ 改了 dags/ 下的文件，**先在本地**跑这个（不需要装 Airflow）
+python scripts/check_dag.py
+
+# 服务器上
+/opt/airflow-venv/bin/airflow dags list                  # 列表（看 is_paused 列）
+/opt/airflow-venv/bin/airflow dags list-import-errors    # ★ DAG 变红/不出现时第一个查这个
+/opt/airflow-venv/bin/airflow dags unpause <dag_id>
+/opt/airflow-venv/bin/airflow dags list-runs -d olist_warehouse_daily
 
 # 触发指定的某一天（CLI 专有）
-airflow dags trigger olist_warehouse_daily -e 2017-11-15
+/opt/airflow-venv/bin/airflow dags trigger olist_warehouse_daily -e 2017-11-15
 
 # 回补一段区间
-airflow dags backfill olist_warehouse_daily \
+/opt/airflow-venv/bin/airflow dags backfill olist_warehouse_daily \
     --start-date 2016-09-04 --end-date 2018-10-18
 ```
 
@@ -290,7 +297,8 @@ free -h
 
 | 症状 | 先查什么 |
 |---|---|
-| **DAG 在 UI 上变红 / 不出现** | `airflow dags list-import-errors` ← 十有八九是缺依赖或 DAG 语法错 |
+| **DAG 在 UI 上变红 / 不出现** | `/opt/airflow-venv/bin/airflow dags list-import-errors`，**或查 `import_error` 表**（见下） |
+| **调度器活着，但 `dag` 表 0 行、不报错** | 见下面的「⑨ 最阴的一种失败」 |
 | **触发后一直 `queued`，task 不跑** | DAG 是不是**暂停**状态（`airflow dags list` 看 `is_paused`） |
 | **UI 打不开** | ① 服务器上 `curl http://127.0.0.1:8080/home` 通不通<br>② `systemctl status airflow-webserver`<br>③ 都不通 → 是 SSH 隧道/VS Code 转发的问题 |
 | **UI 突然假死几秒后恢复** | gunicorn worker 被超时杀掉了 —— 看第四节那个 `WEB_SERVER_WORKER_TIMEOUT` |
@@ -398,3 +406,31 @@ airflow dags unpause <dag_id>       # 或 UI 列表左侧的开关
 ```
 
 **建议**：`git pull` 拉到新 DAG 之后，顺手跑一次 `airflow dags list` 看 `is_paused` 那一列。
+
+**⑨ 最阴的一种失败：DAG 导入失败，但什么都不报**
+
+症状：**调度器 `active`、`dag` 表 0 行、日志里也没有明显报错。**
+
+原因：DAG 文件在**导入期**抛异常（`NameError` / `ImportError` / 模块级拼写错误），
+调度器扫到它 → 导入失败 → 跳过。它不会让调度器崩，所以看起来"一切正常"。
+
+```bash
+# ★ 查这张表 —— Airflow 把导入失败的原因记在这里
+docker exec -it ubuntu-postgres-1 psql -U postgres -d airflow -c \
+  "SELECT filename, LEFT(stacktrace, 600) FROM import_error;"
+```
+
+**本项目踩过一次**：重构时删掉了 `DATA_START` 的定义，但 `start_date=DATA_START` 还在用
+→ `NameError` → 调度器扫到 DAG 却跳过 → 查了很久。
+
+**本地预防**（不需要装 Airflow）：
+
+```bash
+python scripts/check_dag.py
+```
+
+它用桩模块顶替 `airflow`，**真的 import 一遍** DAG 文件 —— 任何导入期错误都会抛出来，
+顺带打印 `schedule` / `start_date` / `end_date` 供肉眼核对。
+
+> **`py_compile` 不够用** —— 它只查语法，查不出 `NameError` 这类
+> "语法没问题、但运行时名字未定义"的错误。**改了 `dags/` 下的文件就跑 `check_dag.py`。**

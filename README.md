@@ -91,6 +91,7 @@ EtlData/
 │   ├── run_all.py             # 一键全流程（全量 / 按购买日增量）
 │   ├── check_idempotent.py    # 幂等性验证（重建前后内容指纹比对）
 │   ├── check_incremental.py   # 增量验收（增量 ≡ 全量 + 幂等 + 宽回看回归）
+│   ├── check_dag.py           # DAG 导入检查（桩模块顶替 airflow，本地即可跑）
 │   ├── demo_replay.py         # 数据回放演示（清空 / 看进度 / 恢复全量）
 │   └── check_dashboard.py     # 看板冒烟测试
 ├── app/
