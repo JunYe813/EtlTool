@@ -77,15 +77,26 @@ def date_bounds() -> tuple:
 
     若只取销售总览的范围，这 16 单在筛选器里永远选不到，
     对账页就会显示 99,425 单而表里是 99,441 —— 属于"从界面上看不出来"的口径缺口。
+
+    数仓被清空时兜底：数据回放演示从「清空 DWD/DWS/ADS」开始
+    （见 `scripts/demo_replay.py`），那段时间两张日表都没有行，
+    `MIN/MAX` 全是 NULL —— 直接把 NULL 交给 `date_input` 会报错。
+    所以退回 ODS 的实际订单跨度（ODS 永远有数据），让看板在空仓期也能打开。
     """
     df = query("""
-        SELECT LEAST(
-                   (SELECT MIN(purchase_date) FROM ads_sale_overview_daily),
-                   (SELECT MIN(purchase_date) FROM ads_payment_reconcile_daily)
+        SELECT COALESCE(
+                   LEAST(
+                       (SELECT MIN(purchase_date) FROM ads_sale_overview_daily),
+                       (SELECT MIN(purchase_date) FROM ads_payment_reconcile_daily)
+                   ),
+                   (SELECT DATE(MIN(order_purchase_timestamp)) FROM olist_orders_dataset)
                ) AS d_min,
-               GREATEST(
-                   (SELECT MAX(purchase_date) FROM ads_sale_overview_daily),
-                   (SELECT MAX(purchase_date) FROM ads_payment_reconcile_daily)
+               COALESCE(
+                   GREATEST(
+                       (SELECT MAX(purchase_date) FROM ads_sale_overview_daily),
+                       (SELECT MAX(purchase_date) FROM ads_payment_reconcile_daily)
+                   ),
+                   (SELECT DATE(MAX(order_purchase_timestamp)) FROM olist_orders_dataset)
                ) AS d_max
     """)
     return df["d_min"].iloc[0], df["d_max"].iloc[0]
