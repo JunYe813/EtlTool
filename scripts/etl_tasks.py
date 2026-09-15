@@ -24,6 +24,7 @@
     python scripts/etl_tasks.py --quality-gate
 """
 import argparse
+import os
 import sys
 import time
 from datetime import date, timedelta
@@ -49,6 +50,64 @@ def window(target: date, lookback: int = LOOKBACK_DAYS_DEFAULT) -> tuple:
     只算 target 当天会让昨天新到的数据永远进不了数仓。
     """
     return target - timedelta(days=lookback), target
+
+
+# ===============================================================
+# 「本次处理哪一天」的解析：正常模式 / 数据回放模式
+# ===============================================================
+# 为什么需要回放模式：
+#   本项目的源 CSV 是静态的（2016-09 ~ 2018-10），不会有新数据每天到达。
+#   若照真实日期跑，定时任务每天都在处理"今天"，而这个区间里没有数据 —— 纯空转。
+#   回放模式把「真实日期」映射到「数据区间里的某一天」，
+#   于是每天的调度都有真实数据可处理，水位线真的在往前推。
+#
+#   映射是**纯函数（无状态）**：同一个 logical date 永远映射到同一个购买日，
+#   所以重跑那次调度结果一致 —— 幂等性不受影响（有状态的游标会破坏这一点）。
+
+DATA_START = date(2016, 9, 4)
+DATA_END = date(2018, 10, 17)
+DATA_SPAN = (DATA_END - DATA_START).days + 1        # 774 个日历天
+
+RUN_MODE = os.environ.get("OLIST_RUN_MODE", "replay").strip().lower()
+REPLAY_EPOCH = date.fromisoformat(os.environ.get("OLIST_REPLAY_EPOCH", "2026-09-15"))
+
+
+def resolve_target(real_date: date, mode: str = None, epoch: date = None) -> date:
+    """
+    把「真实日期」解析成「本次要处理的购买日」。
+
+    mode:
+      "real"   —— 直接用真实日期（数据每天真实到达的场景）
+      "replay" —— 映射到数据区间里的某一天（本项目的默认，见上方说明）
+
+    回放映射：offset = (real_date - epoch) 的天数，对 DATA_SPAN 取模。
+    走到区间末尾会自动绕回开头（循环回放），方便反复演示。
+    """
+    m = mode or RUN_MODE
+    if m != "replay":
+        return real_date
+    offset = (real_date - (epoch or REPLAY_EPOCH)).days % DATA_SPAN
+    return DATA_START + timedelta(days=offset)
+
+
+def advance_watermark(target: date) -> date:
+    """
+    把水位线推进到本次处理的购买日，返回更新后的实际值。
+
+    用 GREATEST 保证只前进不后退（补跑历史某天不会把水位线拉回去），
+    语义与 `run_all.upsert_watermark` 完全一致 —— 两条路径共用一个水位线。
+
+    ⚠️ 回放模式下水位线可能已经在前面（比如回放从 2016-09-04 重新开始时，
+    它会停在之前跑到的最大日期）。想从零开始看它推进，见
+    docs/Airflow使用手册.md「重置回放演示」。
+    """
+    from run_all import read_watermark, upsert_watermark
+
+    engine = get_engine()
+    upsert_watermark(engine, "incremental", target)
+    current = read_watermark(engine)
+    print(f"水位线 etl_watermark.last_date = {current}")
+    return current
 
 
 def check_prerequisites() -> None:
