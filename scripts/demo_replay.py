@@ -28,7 +28,9 @@
     # 4. 演示完 `python scripts/demo_replay.py restore` 恢复全量
 """
 import argparse
+import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -147,16 +149,159 @@ def do_restore() -> int:
     return code
 
 
+def _guess_interval_seconds(expr):
+    """
+    从常见 cron 写法粗估「两次运行的间隔」（秒）。
+
+    只覆盖演示会用的几种形式，认不出来就返回 None 由调用方兜底 ——
+    这里刻意不做完整的 cron 解析（那是 croniter 的活），够用就行。
+    """
+    if not expr:
+        return None
+    f = expr.split()
+    if len(f) == 6:                     # 6 段（带秒）写法
+        minute, hour = f[1], f[2]
+    elif len(f) == 5:
+        minute, hour = f[0], f[1]
+    else:
+        return None
+
+    def every(field, base):
+        """*/N 或 A/N → N*base"""
+        if field.startswith("*/"):
+            field = field[2:]
+        elif "/" in field:
+            field = field.split("/")[1]
+        else:
+            return None
+        try:
+            return int(field) * base
+        except ValueError:
+            return None
+
+    if minute == "*":
+        return 60
+    got = every(minute, 60)
+    if got:
+        return got
+    if hour == "*":
+        return 3600
+    got = every(hour, 3600)
+    if got:
+        return got
+    return 86400 if minute.isdigit() else None
+
+
+def show_preview(interval_arg=None, steps: int = 6) -> int:
+    """
+    回放映射预览：**在调度周期的节奏上**探测，看每次运行会不会推进一天。
+
+    为什么要这样探测：如果按「步长的节奏」探测，无论步长多大都会显示"正常推进"，
+    抓不到「步长 ≫ 调度周期」这个真正的问题。
+    必须在**调度真的多久跑一次**这个节奏上算，才能看出问题。
+
+    判据（interval = 调度间隔，unit = 步长）：
+        interval == unit   → [OK]   每次运行正好推进 1 天（演示的理想状态）
+        interval <  unit   → [FAIL] 同一天内多次运行算出同一个目标日 → 反复处理同一天
+        interval >  unit   → [WARN] 每次跳好几天 → 会跳过一些日子
+    """
+    from etl_tasks import (DATA_END, DATA_START, REPLAY_EPOCH,
+                           REPLAY_UNIT_SECONDS, RUN_MODE, resolve_target)
+
+    unit = REPLAY_UNIT_SECONDS
+    schedule = os.environ.get("OLIST_SCHEDULE")
+    guessed = _guess_interval_seconds(schedule)
+
+    def human(sec):
+        if sec is None:
+            return "?"
+        return f"{sec / 60:.0f} 分钟" if sec >= 60 else f"{sec} 秒"
+
+    print("=" * 72)
+    print("回放映射预览")
+    print("=" * 72)
+    print(f"  OLIST_RUN_MODE            = {RUN_MODE}")
+    print(f"  OLIST_REPLAY_EPOCH        = {REPLAY_EPOCH}")
+    print(f"  OLIST_REPLAY_UNIT_SECONDS = {unit}  →  真实时间每 {human(unit)} 推进一天")
+    print(f"  OLIST_SCHEDULE            = {schedule or '(未设置，DAG 内默认 0 2 * * *)'}")
+    print(f"  数据区间                   {DATA_START} ~ {DATA_END}")
+
+    if RUN_MODE != "replay":
+        print("\n  当前不是 replay 模式，回放映射不生效（直接用真实日期）。")
+        return 0
+
+    interval = interval_arg or guessed
+    src = ("--interval 指定" if interval_arg else
+           "从 OLIST_SCHEDULE 推断" if guessed else
+           "推断失败，退回用步长 —— 结果仅供参考，请用 --interval 显式指定")
+    print(f"\n  调度间隔 ≈ {human(interval)}（{src}）")
+
+    # ---- 核心判据：间隔 vs 步长 ----
+    if interval and interval != unit:
+        print()
+        if interval < unit:
+            print(f"  [FAIL] 调度间隔({human(interval)}) < 步长({human(unit)})")
+            print(f"         后果：要过 {unit / interval:.0f} 次运行目标日才前进 1 天 ——")
+            print("               在那之前每次都反复处理同一天，看起来像「回放不推进」。")
+            print(f"         修法：OLIST_REPLAY_UNIT_SECONDS={int(interval)}")
+        else:
+            print(f"  [WARN] 调度间隔({human(interval)}) > 步长({human(unit)})")
+            print(f"         后果：每次跳 {interval / unit:.0f} 天，会跳过一些日子。")
+            print(f"         修法：OLIST_REPLAY_UNIT_SECONDS={int(interval)}")
+
+    # ---- 可视化：在调度节奏上探测 ----
+    probe = interval or unit
+    base = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+
+    # 提示：当前 offset 走到哪了。epoch 落在午夜时，白天启动演示会"从中间开始"。
+    from etl_tasks import DATA_SPAN
+    cur = resolve_target(base)
+    cur_offset = (cur - DATA_START).days
+    print(f"\n  当前时刻对应的回放进度：第 {cur_offset} 天（{cur}）")
+    if cur_offset > 3:
+        suggested = base.strftime("%Y-%m-%dT%H:%M:%S")
+        print(f"  想让它从第 0 天（{DATA_START}）开始，就把 epoch 设到「现在」附近"
+              f"（支持带时间）：")
+        print(f"      OLIST_REPLAY_EPOCH='{suggested}'")
+
+    print(f"\n  按调度节奏探测 {steps} 次（每次间隔 {human(probe)}）：")
+    results = []
+    for k in range(steps):
+        t = base + timedelta(seconds=probe * k)
+        target = resolve_target(t)
+        results.append(target)
+        print(f"    {t:%Y-%m-%d %H:%M}Z  →  {target}")
+
+    gaps = [(results[i + 1] - results[i]).days for i in range(len(results) - 1)]
+    advanced = sum(g for g in gaps if g > 0)
+    wrapped = any(g < 0 for g in gaps)
+
+    print()
+    if interval and interval == unit:
+        print(f"  [OK] 步长与调度周期匹配 —— 每次运行推进 1 天")
+    elif advanced == 0 and not wrapped:
+        print("  [FAIL] 探测期间目标日**完全没推进** —— 就是上面那个问题")
+    else:
+        print(f"  [OK] 映射在推进（探测期间共前进 {advanced} 天"
+              + "，期间绕回过区间开头，属预期）" if wrapped else "）")
+    print("=" * 72)
+    return 0 if (interval == unit or advanced > 0 or wrapped) else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="数据回放演示工具")
-    parser.add_argument("action", choices=["status", "reset", "restore"],
-                        help="status=看进度 / reset=清空 / restore=恢复全量")
+    parser.add_argument("action", choices=["status", "preview", "reset", "restore"],
+                        help="status=看进度 / preview=看回放映射 / reset=清空 / restore=恢复全量")
     parser.add_argument("--yes", action="store_true", help="reset 时确认执行")
+    parser.add_argument("--interval", type=int,
+                        help="preview：调度间隔（秒）。不传则尝试从 OLIST_SCHEDULE 推断")
     args = parser.parse_args()
 
     if args.action == "status":
         show_status()
         return 0
+    if args.action == "preview":
+        return show_preview(args.interval)
     if args.action == "reset":
         return do_reset(args.yes)
     return do_restore()

@@ -69,7 +69,26 @@ DATA_END = date(2018, 10, 17)
 DATA_SPAN = (DATA_END - DATA_START).days + 1        # 774 个日历天
 
 RUN_MODE = os.environ.get("OLIST_RUN_MODE", "replay").strip().lower()
-REPLAY_EPOCH = date.fromisoformat(os.environ.get("OLIST_REPLAY_EPOCH", "2026-09-15"))
+
+
+def _parse_epoch(raw: str):
+    """
+    回放起点，支持两种写法：
+
+        '2026-09-15'              → 当天 00:00Z（粗粒度）
+        '2026-09-15T06:30:00'     → 精确到秒
+
+    为什么要支持带时间：offset 是 `floor((now - epoch) / 步长)`，
+    若 epoch 只能落在午夜，那"从第 0 天开始"就只在半夜那几分钟成立 ——
+    白天启动演示时 offset 已经跑掉一大截，回放会从数据区间中间开始。
+    """
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return date.fromisoformat(raw)
+
+
+REPLAY_EPOCH = _parse_epoch(os.environ.get("OLIST_REPLAY_EPOCH", "2026-09-15"))
 
 # 回放步长：真实时间每过这么多秒，数据时间推进一天。
 #   86400（默认）= 一天推一天        —— 配合 OLIST_SCHEDULE='0 2 * * *'
@@ -113,8 +132,13 @@ def resolve_target(real_ts, mode: str = None, epoch: date = None,
 
     unit = unit_seconds or REPLAY_UNIT_SECONDS
     elapsed = (_as_utc(real_ts) - _as_utc(epoch or REPLAY_EPOCH)).total_seconds()
-    offset = int(elapsed // unit) % DATA_SPAN
-    return DATA_START + timedelta(days=offset)
+    offset = int(elapsed // unit)
+
+    # epoch 落在"现在之后一点点"时 elapsed 会是负数（比如把 epoch 设成当前时刻、
+    # 但秒数取整差了几十秒）。这种小负数不该绕到数据末尾去，直接从第 0 天开始。
+    if offset < 0:
+        offset = 0
+    return DATA_START + timedelta(days=offset % DATA_SPAN)
 
 
 def advance_watermark(target: date) -> date:
