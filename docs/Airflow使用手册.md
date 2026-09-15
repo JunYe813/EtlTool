@@ -195,10 +195,47 @@ OLIST_SCHEDULE=*/2 * * * *        # 每 2 分钟推进一天
 ⚠️ **别调得比单次运行耗时更短** —— 一次 run 约 6~9 秒（`ads_full_only` 占一半），
 配合 `max_active_runs=1`，周期短于运行耗时时任务会排队积压。**30 秒是安全下限。**
 
-**③ 重置回放演示**（让水位线从头开始推进）
+### ⚠️ 一个必须搞清的问题：回放**不会**让数据"从无到有"
+
+全量重建之后，数仓里**已经是完整数据**了。此时跑回放，每个 run 做的是
+`DELETE` 掉那几天的行 + `INSERT` 一模一样的行 —— **净变化为零**。
+
+所以回放演示的是：
+
+| | 演示的是 |
+|---|---|
+| ✅ | **流水线每天稳定运转** + 每次覆盖后指纹不变（幂等性的现场证明） |
+| ❌ | ~~数据从无到有地累积~~ |
+
+**想看到"数据一天天堆起来"，必须先清空数仓。** 用现成的工具：
+
+```bash
+python scripts/demo_replay.py status      # 看当前进度（覆盖天数、水位线、完整度）
+python scripts/demo_replay.py reset --yes # 清空 DWD/DWS/ADS + 重置水位线
+python scripts/demo_replay.py restore     # 全量重建，恢复完整数据
+```
+
+**★ 安全性**：`reset` **只清 DWD/DWS/ADS，ODS 源数据一行不动**。
+而 DWD 是从 ODS 推出来的，所以 `restore` 能在 10 秒内恢复全量。
+**「清空」是一次可撤销的实验，不是有风险的操作。**
+
+清空后的期望：
+
+| 时间 | 数仓里 |
+|---|---|
+| 第 1 个 run 后 | `2016-09-04` 一天 |
+| 第 10 个 run 后 | 约 13 天（回看窗口也覆盖了前面的日子） |
+| … | 一天天累积，水位线跟着推进，**看板上的 GMV/订单数一天天变多** |
+
+> **现实提醒**：从零走到全量要 **774 个 run** ——
+> 每天一天 = 约 2 年；2 分钟一天 = 约 26 小时。
+> **所以别期望回放到全量**，看前 20~50 天的累积过程就足够说明机制了。
+
+### ③ 重置水位线（低层做法）
+
+`demo_replay.py reset` 已经包含这一步，一般不用手动做。需要单独重置时：
 
 水位线用 `GREATEST` 只前进不后退，所以回放从 2016-09-04 重新开始时它可能停在旧值上。
-想从零看它推进，就把它手动退回去。
 
 ⚠️ **注意连的是数仓库，不是 Airflow 元数据库** —— `etl_watermark` 在 `etl_data` 里（5432，原生 PG），
 不在 Docker 那个存 Airflow 状态的库里（5434）：
@@ -289,3 +326,64 @@ airflow dags backfill <dag> --start-date 2017-11-01 --end-date 2017-11-04
 从模板复制配置时，第一件事是 `grep` 一遍有没有没替换的
 `你的密码` / `<服务器IP>` / `your_password_here`，而不是直接跑。
 跑起来后报的错（如 `password authentication failed`）离根因很远。
+
+**⑥ `airflow.env` 里含空格的值必须加引号**
+
+`airflow.env` 要被**两种解析器**读，规则不一样：
+
+| 谁读 | `OLIST_SCHEDULE=0 2 * * *` 的处理 |
+|---|---|
+| **systemd**（`EnvironmentFile=`） | ✅ 正确 —— 取 `=` 之后的**全部内容**当值 |
+| **bash**（`source ~/airflow/airflow.env`） | ❌ **空格是分隔符** —— 值只剩 `0`，然后把 `2` 当命令执行 |
+
+实测症状：`echo $OLIST_SCHEDULE` 是**空的**，终端还会冒一行 `2: command not found`。
+更坑的是 **systemd 那边其实是对的**，所以 scheduler 行为正常，
+只有你在命令行 `source` 之后做 `airflow dags trigger` 之类的操作时才会异常。
+
+```bash
+# ✗ 值被截断
+OLIST_SCHEDULE=0 2 * * *
+# ✓ 两边都能正确解析（systemd 会剥掉引号）
+OLIST_SCHEDULE='0 2 * * *'
+```
+
+**规则：值里有空格就加引号。** cron 表达式、带空格的路径都属于这类。
+
+**⑦ 手动触发不要用「未来的 logical date」—— 会永远卡在 queued**
+
+```bash
+airflow dags trigger <dag> -e 2026-09-16     # 若 2026-09-16 还没到
+```
+
+**不会报错**，UI 上也显示"触发成功"，但 run 会永远停在 `queued`，
+`Start Date` 空着、`Duration 0s`，task 的 `state` 全是空。
+
+**原因**：Airflow 不调度 logical date 还在未来的 DagRun —— 那个"数据周期"逻辑上还没结束。
+（对定时调度不成问题，因为 logical date 必然在过去；只有手动 `-e` 能指定未来时间。）
+
+**判据（实测过 5 个数据点的规律）**：
+
+| logical date | 相对现在 | 结果 |
+|---|---|---|
+| 2017-11-01 / 2017-11-02 / 2017-10-28 | 过去 | ✅ success |
+| 2026-09-14T02:00（scheduled） | 过去 | ✅ success |
+| **2026-09-16T00:00** | **未来** | ❌ **queued 不动** |
+| 2026-09-15T00:00 | 已过去 | ✅ success |
+
+**注意时区换算**：你本地是 UTC+8。`-e 2026-09-16` 生成的 logical date 是
+`2026-09-16T00:00:00+00:00` = 本地 **9-16 早上 8 点** —— 所以"明天"这种写法很容易踩。
+
+**这类坑的共性**（和 ① `--end-date` 一样）：**不报错、只静默**。
+所以每次手动触发后，**养成看一眼 run 状态的习惯**，不要看到"触发成功"就走。
+
+**⑧ 新建的 DAG 默认是暂停的**
+
+`dags_are_paused_at_creation` 默认 `True` → **新建 DAG 一律暂停**。
+
+症状和 ⑦ 一模一样：UI 上 DAG 看得见、能手动触发，但 run 永远 `queued`。
+
+```bash
+airflow dags unpause <dag_id>       # 或 UI 列表左侧的开关
+```
+
+**建议**：`git pull` 拉到新 DAG 之后，顺手跑一次 `airflow dags list` 看 `is_paused` 那一列。
