@@ -247,7 +247,10 @@ SCHEDULE            = "*/2 * * * *"     # 每 2 分钟跑一次
 跑 `python scripts/demo_replay.py preview` 可以一次验证两者是否配对。
 
 ⚠️ **别把周期调得比单次运行耗时更短** —— 一次 run 约 6~9 秒（`ads_full_only` 占一半），
-配合 `max_active_runs=1`，周期短于运行耗时时任务会排队积压。**30 秒是安全下限。**
+周期短于运行耗时时任务会排队积压。**30 秒是安全下限。**
+
+（原先这里还写了「配合 `max_active_runs=1`」—— 那个值已经改成 3，
+见第六节的警告：`max_active_runs=1` 会把一次小故障放大成整个 DAG 冻结。）
 
 ### ⚠️ 一个必须搞清的问题：回放**不会**让数据"从无到有"
 
@@ -348,11 +351,28 @@ PGPASSWORD='你的数仓密码' psql -h 127.0.0.1 -p 5432 -U postgres -d etl_dat
 |---|---|---|
 | `AIRFLOW__CORE__EXECUTOR` | `LocalExecutor` | 不需要 Celery/Redis，少两个进程 |
 | `AIRFLOW__CORE__PARALLELISM` | `2` | 限制全局并行 task 数 |
-| `AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG` | `1` | 一次只跑一个 task，避免内存尖峰 |
-| `AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG` | `1` | 回补时串行，不并发 |
+| `AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG` | `1` | 一次只跑一个 task，避免内存尖峰。**这一条才是真正的内存保护** |
+| `AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG` | `3` | 见下方警告 —— 原来是 `1`，会把"一个 run 卡住"放大成"整个 DAG 冻结" |
 | `AIRFLOW__WEBSERVER__WORKERS` | `2` | **1 个会被慢请求全堵住**（已实测踩过） |
 | `AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT` | `300` | 默认太短，跑 ETL 时元数据库查询会变慢 |
 | `AIRFLOW__CORE__LOAD_EXAMPLES` | `False` | 不加载示例 DAG |
+
+> ### ⚠️ `MAX_ACTIVE_RUNS_PER_DAG` 为什么从 1 改成 3
+>
+> 原值 `1` 的后果：**只要有一个 run 因为任何原因没结束**（任务失败在重试、
+> 任务挂住、状态异常），调度器就拒绝创建新 run，**整个 DAG 彻底静止，
+> 而且没有任何提示** —— 看板上只看得到「没数据」。实测被这个坑冻过三次。
+>
+> 改成 `3` **不会增加内存压力**，因为 `MAX_ACTIVE_TASKS_PER_DAG=1` 已经保证
+> 同一时刻只有一个 task 真正在跑。run 级并发只是让"卡住的那个"不再挡住别人。
+>
+> **验证它真的生效**（`dag` 表里就有这一列，是权威值 ——
+> `check_dag.py` 用桩模块，只是回显 DAG 参数，证明不了 Airflow 实际取值）：
+>
+> ```bash
+> PGPASSWORD='...' psql -h 127.0.0.1 -p 5434 -U postgres -d airflow -c \
+>   "SELECT dag_id, max_active_runs, is_paused FROM dag;"
+> ```
 
 **为什么不开 triggerer**：只有 deferrable operator 才需要它，本项目没有。
 

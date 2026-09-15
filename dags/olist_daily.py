@@ -116,10 +116,24 @@ default_args = {
     "owner": "wujunye",
     "depends_on_past": False,
     # 幂等 → 敢重试。迟到数据靠 lookback 窗口覆盖，不靠人工补数。
-    "retries": 3,
-    "retry_delay": timedelta(minutes=5),
-    "retry_exponential_backoff": True,
-    "execution_timeout": timedelta(minutes=30),
+    #
+    # ⚠️ 这里**刻意不开指数退避**（曾经开着 `retry_exponential_backoff=True`）。
+    #
+    # 指数退避在「上游偶发限流」的生产场景里是对的（避免把上游打爆），
+    # 但在这个场景里纯粹有害：它把 `retry_delay=5min` 放大成 **5 → 10 → 20 分钟**，
+    # 于是一次任务失败会让整个 run 静默挂住半小时以上。
+    # 再叠加 `max_active_runs=1`，就变成「整个 DAG 冻结、且没有任何提示」。
+    #
+    # 实测代价：排查时我因此多次误判为「调度器卡住 / 执行器坏了」，
+    # 因为「5 分钟就该重试」和「等了 9 分钟还没动静」对不上 —— 是我漏看了这一行。
+    # 教训：**演示/小规模场景要的是"快速暴露"，不是"优雅退避"。**
+    #
+    # 现在的策略：失败 1 次重试后立刻 failed，让问题在 UI 上现形。
+    "retries": 1,
+    "retry_delay": timedelta(minutes=1),
+    "retry_exponential_backoff": False,
+    # 单次任务正常 6~9 秒。给 5 分钟足够宽松，又能保证挂住的 task 不会拖住调度。
+    "execution_timeout": timedelta(minutes=5),
     "email_on_failure": False,        # 没配邮件服务器，告警走 Airflow UI + 日志
 }
 
@@ -210,7 +224,17 @@ with DAG(
     end_date=END_DATE,            # 回放模式下为 None：要一直跑下去（循环回放）
     schedule=SCHEDULE,
     catchup=False,                # 不做自动 catchup，回补显式发起
-    max_active_runs=1,            # 串行；2C2G 的机器上并发跑增量只会互相抢内存
+    # ⚠️ 从 1 放宽到 3 —— 这是**结构性修复**，不是调参。
+    #
+    # 原来 `max_active_runs=1` 的后果：只要有一个 run 因为任何原因没结束
+    # （任务失败在重试、任务挂住、状态异常），调度器就拒绝创建新 run，
+    # 整个 DAG 彻底静止，而且**没有任何提示** —— 看板上只看得到"没数据"。
+    # 实测被这个坑冻过三次，每次都花很久才定位。
+    #
+    # 放宽到 3 不会增加内存压力：`airflow.env` 里的
+    # `AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG=1` 已经保证同一时刻
+    # **只有一个 task 真正在跑**，所以 run 级并发只是让"卡住的那个"不再挡住别人。
+    max_active_runs=3,
     default_args=default_args,
     tags=["olist", "warehouse", "etl"],
 ) as dag:
@@ -225,10 +249,11 @@ with DAG(
     ads = PythonOperator(task_id="ads_incremental", python_callable=task_ads)
 
     # 必须全量的那批：cohort 口径（依赖全部历史）+ 全周期卖家榜 + 视图
+    # execution_timeout 走 default_args 的 5 分钟（这里原来硬编码 60 分钟，
+    # 覆盖了 default_args，等于允许一次挂起冻结一小时）
     full_only = PythonOperator(
         task_id="ads_full_only",
         python_callable=run_full_only,
-        execution_timeout=timedelta(minutes=60),
     )
 
     # 数据质量门禁：对账不通过就 fail，不让下游拿到错数据
