@@ -24,7 +24,6 @@
     python scripts/etl_tasks.py --quality-gate
 """
 import argparse
-import os
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -34,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import replay_config                                            # noqa: E402  (项目根目录)
 from sql_runner import get_engine, report_rows, run_sql_file   # noqa: E402
 from run_all import (                                          # noqa: E402
     INCREMENTAL_FILES_BY_LAYER, LOOKBACK_DAYS_DEFAULT, REQUIRED_TABLES, table_exists,
@@ -68,7 +68,14 @@ DATA_START = date(2016, 9, 4)
 DATA_END = date(2018, 10, 17)
 DATA_SPAN = (DATA_END - DATA_START).days + 1        # 774 个日历天
 
-RUN_MODE = os.environ.get("OLIST_RUN_MODE", "replay").strip().lower()
+# ⚠️ 回放参数的**唯一来源**是项目根目录的 `replay_config.py`。
+#
+# 这里以前读的是 `OLIST_RUN_MODE` / `OLIST_REPLAY_EPOCH` / `OLIST_REPLAY_UNIT_SECONDS`
+# 环境变量，而 `dags/olist_daily.py` 走的是 `replay_config.py` —— **同一个参数两个来源**。
+# systemd 那条路径靠 `EnvironmentFile` 传值、命令行那条路径靠 shell 环境，
+# 两边一旦不一致就会出现「手动跑是 A 日、调度跑是 B 日」，极难查。
+# 现在统一成 import，环境变量改不动回放行为了（这是故意的）。
+RUN_MODE = replay_config.RUN_MODE.strip().lower()
 
 
 def _parse_epoch(raw: str):
@@ -88,15 +95,16 @@ def _parse_epoch(raw: str):
         return date.fromisoformat(raw)
 
 
-REPLAY_EPOCH = _parse_epoch(os.environ.get("OLIST_REPLAY_EPOCH", "2026-09-15"))
+REPLAY_EPOCH = _parse_epoch(replay_config.REPLAY_EPOCH)
 
 # 回放步长：真实时间每过这么多秒，数据时间推进一天。
-#   86400（默认）= 一天推一天        —— 配合 OLIST_SCHEDULE='0 2 * * *'
-#   120          = 每 2 分钟推一天    —— 配合 OLIST_SCHEDULE='*/2 * * * *'（快速演示）
+#   86400（默认）= 一天推一天        —— 配合 SCHEDULE = "0 2 * * *"
+#   120          = 每 2 分钟推一天    —— 配合 SCHEDULE = "0 0/2 * * * *"（快速演示）
 #
-# ⚠️ **必须和调度周期匹配**。如果调度是每 2 分钟一次、而步长还是 86400，
+# ⚠️ **必须和 SCHEDULE 的周期匹配**。如果调度是每 2 分钟一次、而步长还是 86400，
 #    同一天内的多次运行会算出同一个 offset → 反复处理同一天，看着像"回放不推进"。
-REPLAY_UNIT_SECONDS = int(os.environ.get("OLIST_REPLAY_UNIT_SECONDS", "86400"))
+#    跑 `python scripts/demo_replay.py preview` 可以一次验证两者是否匹配。
+REPLAY_UNIT_SECONDS = replay_config.REPLAY_UNIT_SECONDS
 
 
 def _as_utc(ts) -> datetime:
@@ -104,7 +112,7 @@ def _as_utc(ts) -> datetime:
     str / date / datetime → 带 UTC 时区的 datetime。
 
     接受字符串是因为配置通常写成文本（`replay_config.REPLAY_EPOCH`
-    和 `OLIST_REPLAY_EPOCH` 都是字符串），调用方不该被迫先转换一遍。
+    和 `replay_config.REPLAY_EPOCH` 都是字符串），调用方不该被迫先转换一遍。
     """
     if isinstance(ts, str):
         ts = _parse_epoch(ts)          # '2026-09-15' 或 '2026-09-15T06:36:00'

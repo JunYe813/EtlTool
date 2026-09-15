@@ -169,20 +169,30 @@ CSV 只覆盖 `2016-09-04 ~ 2018-10-17`，**明天不会长出新数据**。
 
 这样两条用法互不干扰：**想跑哪天就传哪天，定时运行自动推进。**
 
-### 配置（都在 `~/airflow/airflow.env`）
+### 配置（都在项目根目录的 `replay_config.py`）
 
-```bash
-OLIST_RUN_MODE=replay             # replay（默认，映射到历史）/ real（用真实日期）
-OLIST_REPLAY_EPOCH=2026-09-15     # 回放起点：真实时间从这天 00:00Z 算 offset 0
-OLIST_REPLAY_UNIT_SECONDS=86400   # 步长：真实时间每过多少秒，数据时间推进一天
-OLIST_SCHEDULE='0 2 * * *'        # 调度周期（含空格必须加引号，见第八节⑥）
+**⚠️ 回放参数只有这一个来源。** 早期版本读的是 `~/airflow/airflow.env` 里的
+`OLIST_RUN_MODE` / `OLIST_REPLAY_EPOCH` / `OLIST_REPLAY_UNIT_SECONDS` / `OLIST_SCHEDULE`，
+但 DAG 走的是 `replay_config.py` —— **同一个参数两个来源**，于是出现「手动跑是 A 日、
+调度跑是 B 日」，极难排查。现在那几个环境变量**已经没有任何代码在读它们了**，
+设了也不生效（`airflow.env` 里若还留着，直接删掉即可）。
+
+```python
+# replay_config.py
+RUN_MODE            = "replay"              # replay（映射到历史）/ real（用真实日期）
+REPLAY_EPOCH        = "2026-09-15T06:36:00" # 回放起点，建议精确到秒
+REPLAY_UNIT_SECONDS = 86400                 # 步长：真实时间每过多少秒 = 数据时间推进一天
+SCHEDULE            = "0 2 * * *"           # 调度周期
 ```
 
-改完要重启服务（DAG 文件的 env 是启动时读的）：
+改完**不用重启服务** —— `git pull` 后调度器会自动重新解析 DAG：
 
 ```bash
-sudo systemctl restart airflow-scheduler airflow-webserver
+cd /opt/etl_data && git pull
 ```
+
+（`SCHEDULE` / `end_date` 必须在 DAG **解析期**确定，而解析期查库是 Airflow 不推荐的做法，
+所以这些值放在代码里、跟着 git 版本管理，是刻意的设计。）
 
 ### 怎么验证 / 怎么快速演示
 
@@ -195,17 +205,24 @@ airflow dags trigger olist_warehouse_daily -e 2026-09-16 -c '{"force_replay": tr
 
 **② 想几分钟看完多天推进** —— ⚠️ **步长和调度周期必须一起改**
 
-```bash
-# airflow.env
-OLIST_REPLAY_UNIT_SECONDS=120     # 每 2 分钟推一天
-OLIST_SCHEDULE='*/2 * * * *'      # 每 2 分钟跑一次
+```python
+# replay_config.py 里同时改这两行
+REPLAY_UNIT_SECONDS = 120        # 每 2 分钟推一天
+SCHEDULE            = "0 0/2 * * * *"   # 每 2 分钟跑一次
 ```
 
-| 场景 | `OLIST_REPLAY_UNIT_SECONDS` | `OLIST_SCHEDULE` |
+| 场景 | `REPLAY_UNIT_SECONDS` | `SCHEDULE` |
 |---|---|---|
-| 正式演示 | `86400` | `'0 2 * * *'` |
-| 快速演示 | `120` | `'*/2 * * * *'` |
-| 极速演示 | `30` | `'* * * * *'`（每分钟，约 43 秒一步） |
+| 正式演示 | `86400` | `"0 2 * * *"` |
+| 快速演示 | `120` | `"0 0/2 * * * *"` |
+| 极速演示 | `30` | `"* * * * *"`（每分钟，约 43 秒一步） |
+
+> `SCHEDULE` 用的是 **6 段 cron（第一段是秒）**：`"0 0/2 * * * *"` = 每分钟的偶数分整点。
+> 写成 5 段的 `"*/2 * * * *"` 是「每 2 分钟」的另一种写法，Airflow 也收，但含义不如 6 段直白。
+
+**只改调度、不改步长会怎样**：步长还是 `86400` 时，同一天内的多次运行会算出**同一个 offset**
+→ 反复处理同一天，**看起来像"回放不推进"**。反过来步长比周期小太多，会一天跳好几步。
+跑 `python scripts/demo_replay.py preview` 可以一次验证两者是否配对。
 
 **只改调度、不改步长会怎样**：步长还是 `86400` 时，同一天内的多次运行会算出**同一个 offset**
 → 反复处理同一天，**看起来像"回放不推进"**。反过来步长比周期小太多，会一天跳好几步。
@@ -348,25 +365,34 @@ airflow dags backfill <dag> --start-date 2017-11-01 --end-date 2017-11-04
 
 **⑥ `airflow.env` 里含空格的值必须加引号**
 
-`airflow.env` 要被**两种解析器**读，规则不一样：
+> **现状**：回放参数（含 `SCHEDULE`）已经搬到 `replay_config.py`，
+> `airflow.env` 里**不再需要**任何带空格的值，所以这一条对回放配置已经不适用了。
+> 留着是因为它记录了一个真实的教训 —— 而且 `airflow.env` 里若将来再加带空格的值，
+> 同样会踩。**这个坑本身也是回放配置搬家的原因之一。**
 
-| 谁读 | `OLIST_SCHEDULE=0 2 * * *` 的处理 |
+`airflow.env` 会被**两种解析器**读，规则不一样：
+
+| 谁读 | `SOME_VAR=0 2 * * *` 的处理 |
 |---|---|
 | **systemd**（`EnvironmentFile=`） | ✅ 正确 —— 取 `=` 之后的**全部内容**当值 |
 | **bash**（`source ~/airflow/airflow.env`） | ❌ **空格是分隔符** —— 值只剩 `0`，然后把 `2` 当命令执行 |
 
-实测症状：`echo $OLIST_SCHEDULE` 是**空的**，终端还会冒一行 `2: command not found`。
+实测症状：`echo $VAR` 是**空的**，终端还会冒一行 `2: command not found`。
 更坑的是 **systemd 那边其实是对的**，所以 scheduler 行为正常，
 只有你在命令行 `source` 之后做 `airflow dags trigger` 之类的操作时才会异常。
 
 ```bash
 # ✗ 值被截断
-OLIST_SCHEDULE=0 2 * * *
+SOME_VAR=0 2 * * *
 # ✓ 两边都能正确解析（systemd 会剥掉引号）
-OLIST_SCHEDULE='0 2 * * *'
+SOME_VAR='0 2 * * *'
 ```
 
 **规则：值里有空格就加引号。** cron 表达式、带空格的路径都属于这类。
+
+**这条坑的真正教训**：同一份配置被两条路径用两种规则读取时，**故障会只在一半场景下出现**，
+而且症状离根因极远。正确解法不是"记得加引号"，而是**让配置只有一个来源** ——
+所以回放参数现在放在 `replay_config.py`，systemd 和命令行读的是同一份 Python 代码。
 
 **⑦ 手动触发不要用「未来的 logical date」—— 会永远卡在 queued**
 

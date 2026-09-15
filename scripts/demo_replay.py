@@ -18,8 +18,9 @@
 
 清空之后的演示流程：
     # 1. 用密集一点的调度快速推进（可选，默认每天一天）
-    #    ~/airflow/airflow.env:  OLIST_SCHEDULE='*/2 * * * *'
-    #    sudo systemctl restart airflow-scheduler airflow-webserver
+    #    replay_config.py:  SCHEDULE = "0 0/2 * * * *"   每 2 分钟一次
+    #    （改完 git pull 即可，调度器会自动重新解析 DAG，不用重启服务）
+    #    ⚠️ SCHEDULE 和 REPLAY_UNIT_SECONDS 必须配对，见 replay_config.py 的说明
     # 2. 让 scheduler 自己跑，或手动推进若干天：
     #    for d in 2026-09-15 2026-09-16 2026-09-17; do
     #      airflow dags trigger olist_warehouse_daily -e "$d" -c '{"force_replay": true}'
@@ -302,7 +303,7 @@ def main() -> int:
                         help="status=看进度 / preview=看回放映射 / reset=清空 / restore=恢复全量")
     parser.add_argument("--yes", action="store_true", help="reset 时确认执行")
     parser.add_argument("--interval", type=int,
-                        help="preview：调度间隔（秒）。不传则尝试从 OLIST_SCHEDULE 推断")
+                        help="preview：调度间隔（秒）。不传则从 replay_config.SCHEDULE 推断")
     args = parser.parse_args()
 
     if args.action == "status":
