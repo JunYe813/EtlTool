@@ -37,7 +37,7 @@ Olist 四层数仓 · 每日增量 DAG
        RUN_MODE              = "replay"              # replay / real
        REPLAY_EPOCH          = "2026-09-15T06:36:00" # 第 0 天对应的真实时刻
        REPLAY_UNIT_SECONDS   = 120                   # 真实时间每多少秒推进一天
-       SCHEDULE              = "0 0/2 * * * *"       # 调度周期
+       SCHEDULE              = "*/2 * * * *"         # 调度周期（**必须 5 段**）
 
    为什么不用环境变量：环境变量要经 systemd 的 `EnvironmentFile` 传到调度器进程，
    而 CLI 走的是 shell 环境 —— 两条路径读到的不是一份配置，再加上 `airflow.cfg`
@@ -48,7 +48,13 @@ Olist 四层数仓 · 每日增量 DAG
    ⚠️ 步长和调度周期必须匹配。演示时想快点推进，两个一起改：
 
        正式：REPLAY_UNIT_SECONDS = 86400  +  SCHEDULE = "0 2 * * *"
-       演示：REPLAY_UNIT_SECONDS = 120    +  SCHEDULE = "0 0/2 * * * *"
+       演示：REPLAY_UNIT_SECONDS = 120    +  SCHEDULE = "*/2 * * * *"
+
+   ⚠️⚠️ `SCHEDULE` **必须是 5 段 cron**。写成 6 段（曾误用 `"0 0/2 * * * *"`）
+   不会报错，但 croniter 把 6 段当作 `分 时 日 月 周 年`（第 6 段是**年**，不是秒），
+   于是它变成「每 2 小时」—— 调度器一切正常，只是几小时才跑一次，极难察觉。
+   铁证看元数据库的 `next_dagrun_create_after` 是否落在整点偶数小时。
+   详见 `replay_config.py` 的「调度周期」一节。
 
    只改调度不改步长的话，同一天内的多次运行会算出同一个 offset ——
    反复处理同一天，**看起来像"回放不推进"**。

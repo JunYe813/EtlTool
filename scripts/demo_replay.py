@@ -18,7 +18,7 @@
 
 清空之后的演示流程：
     # 1. 用密集一点的调度快速推进（可选，默认每天一天）
-    #    replay_config.py:  SCHEDULE = "0 0/2 * * * *"   每 2 分钟一次
+    #    replay_config.py:  SCHEDULE = "*/2 * * * *"   每 2 分钟一次（必须 5 段 cron）
     #    （改完 git pull 即可，调度器会自动重新解析 DAG，不用重启服务）
     #    ⚠️ SCHEDULE 和 REPLAY_UNIT_SECONDS 必须配对，见 replay_config.py 的说明
     # 2. 让 scheduler 自己跑，或手动推进若干天：
@@ -163,12 +163,17 @@ def _guess_interval_seconds(expr):
     if not expr:
         return None
     f = expr.split()
-    if len(f) == 6:                     # 6 段（带秒）写法
-        minute, hour = f[1], f[2]
-    elif len(f) == 5:
-        minute, hour = f[0], f[1]
-    else:
+    if len(f) not in (5, 6):
         return None
+    # ⚠️ 段数**不影响**「分 / 时」的位置：croniter（Airflow 的底层实现）把 6 段
+    #    当作 `分 时 日 月 周 年` —— **第 6 段是「年」，不是「秒」**。
+    #
+    #    这里曾经写成 `f[1], f[2]`（误以为 6 段是 `秒 分 时 …`），于是对
+    #    错误的 `"0 0/2 * * * *"` 也推断出 120 秒、给出 `[OK]` 的**假通过** ——
+    #    而它实际含义是「每 2 小时」。**诊断工具和配置犯了同一个误解，
+    #    就互相放过了**，白等了几个小时才发现。所以这里刻意按 croniter 的
+    #    真实语义取 `f[0], f[1]`。
+    minute, hour = f[0], f[1]
 
     def every(field, base):
         """*/N 或 A/N → N*base"""
