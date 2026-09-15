@@ -34,9 +34,18 @@ Olist 四层数仓 · 每日增量 DAG
    所以重跑那次调度结果一致，幂等性不受影响。
 
    配置（都在 ~/airflow/airflow.env）：
-       OLIST_RUN_MODE=replay           # replay（默认，映射到历史）/ real（用真实日期）
-       OLIST_REPLAY_EPOCH=2026-09-15   # 回放起点：真实日期从这天开始算 offset 0
-       OLIST_SCHEDULE=0 2 * * *        # 调度周期；演示时想快点推进可以改密一些
+       OLIST_RUN_MODE=replay             # replay（默认，映射到历史）/ real（用真实日期）
+       OLIST_REPLAY_EPOCH=2026-09-15     # 回放起点：真实时间从这天 00:00Z 算 offset 0
+       OLIST_REPLAY_UNIT_SECONDS=86400   # 步长：真实时间每过多少秒，数据时间推进一天
+       OLIST_SCHEDULE='0 2 * * *'        # 调度周期（**含空格必须加引号**）
+
+   ⚠️ 步长和调度周期必须匹配。演示时想快点推进，两个一起改：
+
+       正式：OLIST_REPLAY_UNIT_SECONDS=86400  +  OLIST_SCHEDULE='0 2 * * *'
+       快速：OLIST_REPLAY_UNIT_SECONDS=120    +  OLIST_SCHEDULE='*/2 * * * *'
+
+   只改调度不改步长的话，同一天内的多次运行会算出同一个 offset ——
+   反复处理同一天，**看起来像"回放不推进"**。
 
    两种用法都支持，互不冲突：
        ① 让它每天自动推进一天      —— 起 scheduler 就行，什么都不用敲
@@ -119,12 +128,17 @@ def _should_replay(context) -> bool:
 
 
 def _target(**context) -> date:
-    """本次运行要处理的购买日（回放模式下会映射到数据区间里的某一天）"""
-    real = date.fromisoformat(context["ds"])
+    """
+    本次运行要处理的购买日（回放模式下会映射到数据区间里的某一天）。
+
+    用 `logical_date`（带时区的 datetime）而不是 `ds`（只有日期）——
+    回放步长按**秒**算，需要时间粒度才能支持「2 分钟推一天」这类密集演示调度。
+    """
+    logical = context["logical_date"]
     if not _should_replay(context):
-        return real
-    target = resolve_target(real, mode="replay")
-    print(f"[回放模式] logical date {real} → 实际处理的购买日 {target}")
+        return logical.date()
+    target = resolve_target(logical, mode="replay")
+    print(f"[回放模式] logical date {logical} → 实际处理的购买日 {target}")
     return target
 
 

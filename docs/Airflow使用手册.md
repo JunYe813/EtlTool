@@ -165,9 +165,10 @@ CSV 只覆盖 `2016-09-04 ~ 2018-10-17`，**明天不会长出新数据**。
 ### 配置（都在 `~/airflow/airflow.env`）
 
 ```bash
-OLIST_RUN_MODE=replay            # replay（默认，映射到历史）/ real（用真实日期）
-OLIST_REPLAY_EPOCH=2026-09-15    # 回放起点：真实日期从这天算 offset 0
-OLIST_SCHEDULE=0 2 * * *         # 调度周期
+OLIST_RUN_MODE=replay             # replay（默认，映射到历史）/ real（用真实日期）
+OLIST_REPLAY_EPOCH=2026-09-15     # 回放起点：真实时间从这天 00:00Z 算 offset 0
+OLIST_REPLAY_UNIT_SECONDS=86400   # 步长：真实时间每过多少秒，数据时间推进一天
+OLIST_SCHEDULE='0 2 * * *'        # 调度周期（含空格必须加引号，见第八节⑥）
 ```
 
 改完要重启服务（DAG 文件的 env 是启动时读的）：
@@ -185,14 +186,24 @@ airflow dags trigger olist_warehouse_daily -e 2026-09-16 -c '{"force_replay": tr
 # 日志里会打印：[回放模式] logical date 2026-09-16 → 实际处理的购买日 2016-09-05
 ```
 
-**② 想几分钟看完多天推进**，把周期改密：
+**② 想几分钟看完多天推进** —— ⚠️ **步长和调度周期必须一起改**
 
 ```bash
 # airflow.env
-OLIST_SCHEDULE=*/2 * * * *        # 每 2 分钟推进一天
+OLIST_REPLAY_UNIT_SECONDS=120     # 每 2 分钟推一天
+OLIST_SCHEDULE='*/2 * * * *'      # 每 2 分钟跑一次
 ```
 
-⚠️ **别调得比单次运行耗时更短** —— 一次 run 约 6~9 秒（`ads_full_only` 占一半），
+| 场景 | `OLIST_REPLAY_UNIT_SECONDS` | `OLIST_SCHEDULE` |
+|---|---|---|
+| 正式演示 | `86400` | `'0 2 * * *'` |
+| 快速演示 | `120` | `'*/2 * * * *'` |
+| 极速演示 | `30` | `'* * * * *'`（每分钟，约 43 秒一步） |
+
+**只改调度、不改步长会怎样**：步长还是 `86400` 时，同一天内的多次运行会算出**同一个 offset**
+→ 反复处理同一天，**看起来像"回放不推进"**。反过来步长比周期小太多，会一天跳好几步。
+
+⚠️ **别把周期调得比单次运行耗时更短** —— 一次 run 约 6~9 秒（`ads_full_only` 占一半），
 配合 `max_active_runs=1`，周期短于运行耗时时任务会排队积压。**30 秒是安全下限。**
 
 ### ⚠️ 一个必须搞清的问题：回放**不会**让数据"从无到有"

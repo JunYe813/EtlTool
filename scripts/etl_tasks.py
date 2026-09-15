@@ -27,7 +27,7 @@ import argparse
 import os
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,22 +71,49 @@ DATA_SPAN = (DATA_END - DATA_START).days + 1        # 774 个日历天
 RUN_MODE = os.environ.get("OLIST_RUN_MODE", "replay").strip().lower()
 REPLAY_EPOCH = date.fromisoformat(os.environ.get("OLIST_REPLAY_EPOCH", "2026-09-15"))
 
+# 回放步长：真实时间每过这么多秒，数据时间推进一天。
+#   86400（默认）= 一天推一天        —— 配合 OLIST_SCHEDULE='0 2 * * *'
+#   120          = 每 2 分钟推一天    —— 配合 OLIST_SCHEDULE='*/2 * * * *'（快速演示）
+#
+# ⚠️ **必须和调度周期匹配**。如果调度是每 2 分钟一次、而步长还是 86400，
+#    同一天内的多次运行会算出同一个 offset → 反复处理同一天，看着像"回放不推进"。
+REPLAY_UNIT_SECONDS = int(os.environ.get("OLIST_REPLAY_UNIT_SECONDS", "86400"))
 
-def resolve_target(real_date: date, mode: str = None, epoch: date = None) -> date:
+
+def _as_utc(ts) -> datetime:
+    """date 或（可能不带时区的）datetime → 带 UTC 时区的 datetime"""
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    return datetime(ts.year, ts.month, ts.day, tzinfo=timezone.utc)
+
+
+def resolve_target(real_ts, mode: str = None, epoch: date = None,
+                   unit_seconds: int = None) -> date:
     """
-    把「真实日期」解析成「本次要处理的购买日」。
+    把「本次运行的真实时间」解析成「要处理的购买日」。
 
     mode:
       "real"   —— 直接用真实日期（数据每天真实到达的场景）
       "replay" —— 映射到数据区间里的某一天（本项目的默认，见上方说明）
 
-    回放映射：offset = (real_date - epoch) 的天数，对 DATA_SPAN 取模。
+    回放映射（纯函数、无状态）：
+
+        offset = floor((real_ts - epoch) / 步长秒数) % DATA_SPAN
+        target = DATA_START + offset 天
+
+    **为什么用「秒」算而不是「天数差」**：天数差只有天的粒度，
+    同一天内跑多次会得到同一个 offset —— 回放就不推进了。
+    按秒算才能支持比"一天一次"更密的演示调度（比如 2 分钟一天）。
+
     走到区间末尾会自动绕回开头（循环回放），方便反复演示。
     """
     m = mode or RUN_MODE
     if m != "replay":
-        return real_date
-    offset = (real_date - (epoch or REPLAY_EPOCH)).days % DATA_SPAN
+        return real_ts.date() if isinstance(real_ts, datetime) else real_ts
+
+    unit = unit_seconds or REPLAY_UNIT_SECONDS
+    elapsed = (_as_utc(real_ts) - _as_utc(epoch or REPLAY_EPOCH)).total_seconds()
+    offset = int(elapsed // unit) % DATA_SPAN
     return DATA_START + timedelta(days=offset)
 
 
