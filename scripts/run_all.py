@@ -42,12 +42,21 @@ LAYERS = {
     "dws": ["sql/02_dws.sql"],
 }
 
-# 增量路径：顺序即依赖顺序（DWS / ADS 依赖 DWD；明细先于主表）
-INCREMENTAL_FILES = [
-    "sql/load/01_dwd_inc.sql",
-    "sql/load/02_dws_inc.sql",
-    "sql/load/03_ads_inc.sql",
-]
+# 增量路径：按层拆分，顺序即依赖顺序（DWS / ADS 依赖 DWD；明细先于主表）
+#
+# 为什么按层拆成 dict 而不是一个平铺列表：
+#   调度器（Airflow / systemd）需要**每层一个 task**，这样某一层失败能单独重试、
+#   也能在 UI 上看出卡在哪层。平铺列表只能一次性全跑，做不到。
+#   etl_tasks.py 直接 import 这个 dict，保证「调度跑的顺序」和「手工跑的顺序」
+#   来自同一份定义，不会各写一份而漂移。
+INCREMENTAL_FILES_BY_LAYER = {
+    "dwd": ["sql/load/01_dwd_inc.sql"],
+    "dws": ["sql/load/02_dws_inc.sql"],
+    "ads": ["sql/load/03_ads_inc.sql"],
+}
+
+# 手工一次性跑用的平铺列表（顺序 = 上面 dict 的值按插入顺序展开）
+INCREMENTAL_FILES = [f for files in INCREMENTAL_FILES_BY_LAYER.values() for f in files]
 
 # 增量路径的前提：这些表必须已存在（增量 SQL 里没有 CREATE）
 REQUIRED_TABLES = [

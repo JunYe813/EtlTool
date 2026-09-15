@@ -5,7 +5,7 @@
 放在 scripts/ 下，改动看板后跑一遍即可确认没写崩。
 
 两个阶段：
-  阶段 1  · 默认筛选 —— 入口 + 6 个页面各跑一遍
+  阶段 1  · 默认筛选 —— 入口 + 7 个页面各跑一遍
   阶段 1b · 口径开关 —— 支付对账页的「全量 / 可比对」两条 SQL 分支都要跑到
   阶段 2  · 带筛选条件 —— 只对吃维度筛选的页面跑多个场景
 
@@ -44,11 +44,12 @@ PAGES = [
     "pages/seller_region.py",
     "pages/user_analysis.py",
     "pages/fulfillment.py",
+    "pages/payment_channel.py",
     "pages/payment_reconcile.py",
 ]
 
 # 只有这两个页面调用了 dim_where()，会拼 {cat_where} / {state_where}
-# （其余 3 个页面只用 date_params，筛选维度对它们无影响）
+# （其余页面只用 date_params，筛选维度对它们无影响）
 FILTER_PAGES = [
     "pages/product_analysis.py",     # dim_where(f, "category_name", "cats")
     "pages/seller_region.py",        # dim_where(f, "seller_state", "states")

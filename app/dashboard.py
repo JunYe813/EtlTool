@@ -7,7 +7,7 @@ Olist 巴西电商 · 数仓 BI 看板（入口）
 结构：
     app/dashboard.py        入口：全局筛选器 + 多页面导航
     app/db.py               共享数据访问层（连接、缓存、筛选器）
-    app/pages/*.py          6 个分析页面
+    app/pages/*.py          7 个分析页面
 """
 import sys
 from pathlib import Path
@@ -35,7 +35,7 @@ st.caption(
 )
 
 # 全局筛选器必须在 nav.run() 之前渲染：
-# 入口脚本先于页面脚本执行，5 个页面因此共享同一套筛选条件
+# 入口脚本先于页面脚本执行，7 个页面因此共享同一套筛选条件
 render_sidebar_filters()
 
 navigation = st.navigation([
@@ -44,6 +44,7 @@ navigation = st.navigation([
     st.Page("pages/seller_region.py",   title="卖家与地区", icon=":material/storefront:"),
     st.Page("pages/user_analysis.py",   title="用户分析",   icon=":material/groups:"),
     st.Page("pages/fulfillment.py",     title="履约漏斗",   icon=":material/local_shipping:"),
+    st.Page("pages/payment_channel.py", title="渠道对比",   icon=":material/payments:"),
     st.Page("pages/payment_reconcile.py", title="支付对账", icon=":material/balance:"),
 ])
 navigation.run()

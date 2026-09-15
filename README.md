@@ -36,7 +36,7 @@ flowchart TD
 
     VIEWS -->|app/dashboard.py| BI
 
-    BI["<b>Streamlit BI 看板</b><br/>6 个页面 + 全局筛选器"]
+    BI["<b>Streamlit BI 看板</b><br/>7 个页面 + 全局筛选器"]
 
     classDef ods fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
     classDef dwd fill:#fff8e1,stroke:#f9a825,color:#e65100
@@ -95,7 +95,7 @@ EtlData/
 ├── app/
 │   ├── dashboard.py           # 看板入口（全局筛选器 + 多页导航）
 │   ├── db.py                  # 共享数据访问层
-│   └── pages/                 # 6 个分析页面
+│   └── pages/                 # 7 个分析页面
 ├── data/                      # 9 个原始 CSV（不入库，下载方式见下方）
 ├── docs/
 │   ├── 数据字典.md             # 字段含义、脏数据点、口径定义
@@ -217,7 +217,7 @@ python scripts/check_dashboard.py         # 看板冒烟测试
 
 ```bash
 python scripts/check_idempotent.py --all
-# 幂等验证 PASS：20 个对象重建前后内容完全一致
+# 幂等验证 PASS：21 个对象重建前后内容完全一致
 ```
 
 ### 已知的非确定性问题（已修复）
@@ -271,7 +271,7 @@ SET last_date = GREATEST(etl_watermark.last_date, EXCLUDED.last_date)
 
 ```bash
 python scripts/check_incremental.py
-# 增量验收 PASS：20 个对象 · 增量 ≡ 全量 · 两次增量结果一致 · 宽回看（跨 4 个月）一致 · GMV 三层一致
+# 增量验收 PASS：21 个对象 · 增量 ≡ 全量 · 两次增量结果一致 · 宽回看（跨 4 个月）一致 · GMV 三层一致
 ```
 
 > 第 ⑥ 步（宽回看窗口）是**回归测试**，专门盯一个已实测复现过的缺陷：
@@ -355,9 +355,10 @@ streamlit run app/dashboard.py
 | **卖家与地区** | `v_sale_daily_seller_state`、`v_sale_daily_buyer_state`、`ads_top_seller` | 卖家州/买家州 GMV 对比 + 卖家 TopN |
 | **用户分析** | `ads_user_retention`、`v_retention_curve`、`ads_user_repeat_*` | 复购率 metric + 留存曲线 + 加权留存率 + 复购率月度趋势（标注右删失） |
 | **履约漏斗** | `v_fulfillment_funnel`、`ads_fulfillment_monthly` | 四级漏斗 + 各环节流失 + 时长指标 + 月度趋势 |
+| **渠道对比** | `v_payment_daily_channel` | 渠道金额占比环形图 + 金额对比柱状 + 加权平均分期 + 渠道份额月度趋势（按金额归一化堆叠） |
 | **支付对账** | `ads_payment_reconcile`、`ads_payment_reconcile_daily` | 8 个对账指标 + **口径开关**（全量 / 可比对）+ 差异类型构成 + 日度净差趋势 + 差异明细 + 待逐单追查清单 |
 
-全局筛选器（侧边栏，6 个页面共享）：日期范围 / 英文类目 / 卖家州 / 留存最小 cohort 规模。
+全局筛选器（侧边栏，7 个页面共享）：日期范围 / 英文类目 / 卖家州 / 留存最小 cohort 规模。
 
 **看板设计要点**：
 - 日期筛选默认取**数据实际范围**（2016-09-04 ~ 2018-10-17），不是「最近 7 天」。
@@ -369,13 +370,15 @@ streamlit run app/dashboard.py
 - 视图只暴露**日粒度可加事实**，不暴露跨天不可加的去重指标
 - 支付对账页的**口径开关**只是切换统计口径，数据一行都不会删 ——
   对账表的立场是「把所有对不上的都记下来并归因」，而不是「把不好看的删掉」
+- 渠道对比页刻意用**金额**而不是订单数算份额：一单可含多种支付方式（实测 2,211 单），
+  各渠道订单数相加会虚高（100,412 vs 真实 98,201），金额才是可加的
 - `st.cache_data(ttl=300)` 缓存，并提供「刷新数据缓存」按钮（ADS 重跑后缓存不自动失效）
 
 **冒烟测试**（无头运行，不需要浏览器）：
 
 ```bash
 python scripts/check_dashboard.py
-# 冒烟测试 PASS：入口 + 6 个页面 + 2 个筛选页面 × 5 个场景 全部无异常
+# 冒烟测试 PASS：入口 + 7 个页面 + 2 个筛选页面 × 5 个场景 全部无异常
 # 另含「支付对账页 · 口径开关」两条 SQL 分支各跑一遍
 ```
 

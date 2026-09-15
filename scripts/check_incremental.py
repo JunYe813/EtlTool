@@ -55,7 +55,7 @@ OBJECTS = [
     "ads_fulfillment_monthly",
     "ads_payment_reconcile", "ads_payment_reconcile_daily",
     "v_sale_daily_category", "v_sale_daily_seller_state", "v_sale_daily_buyer_state",
-    "v_fulfillment_funnel", "v_retention_curve",
+    "v_fulfillment_funnel", "v_retention_curve", "v_payment_daily_channel",
 ]
 
 # 宽回看窗口（天）——必须大到让区间跨 ≥3 个月份，才能覆盖月粒度表的漏删缺陷

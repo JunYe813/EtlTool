@@ -1,0 +1,24 @@
+# ETL 依赖（服务器 / 调度用，最小集）
+#
+# 为什么和 requirements.txt 分开：ETL 路径只用得到 4 个包。
+#
+#   包                           ETL 要用      只有看板要用
+#   SQLAlchemy                      ✅
+#   psycopg2-binary                 ✅
+#   python-dotenv                   ✅
+#   pandas                          ✅（仅 olist_import.py）
+#   streamlit                                     ✅
+#   altair                                        ✅
+#
+# streamlit + altair 占了本地 venv（417MB）里的一大半。
+# 在 2 核 2G 的服务器上只跑 ETL，装这套约 150MB、30 秒装完。
+#
+# 本地开发要看板就装 requirements.txt（本文件是它的子集）。
+#
+# 用法：
+#   python3 -m venv venv && venv/bin/pip install -r requirements-etl.txt
+
+pandas>=2.0
+SQLAlchemy>=2.0
+psycopg2-binary>=2.9
+python-dotenv>=1.0

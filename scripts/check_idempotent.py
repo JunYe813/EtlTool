@@ -41,6 +41,7 @@ LAYER_OBJECTS = {
         "v_sale_daily_buyer_state",
         "v_fulfillment_funnel",
         "v_retention_curve",
+        "v_payment_daily_channel",
     ],
 }
 

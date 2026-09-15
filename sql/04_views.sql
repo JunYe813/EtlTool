@@ -110,6 +110,43 @@ SELECT cohort_date, cohort_size, observable_days, 90,
 FROM ads_user_retention;
 
 
+-- ---------------------------------------------------------------
+-- ⑥ 支付渠道 日 × 支付方式（看板「渠道对比」）
+--
+-- ⚠️ 第一版写成「按 payment_type 全周期聚合、无日期列」，违反本文件顶部的约束，
+--    已改。两个问题都在本文件顶部有对应条款：
+--
+--    ① **必须保留日期粒度** —— 没有 purchase_date 的话，看板日期筛选对它无效，
+--       它会变成全项目唯一不响应筛选器的视图。
+--
+--    ② **order_cnt 跨渠道不可加** —— 一单可含多种支付方式（实测 2,211 单），
+--       所以 COUNT(DISTINCT order_id) 各渠道相加会虚高：
+--       实测相加 100,412 vs 真实去重 98,201，虚高 2,211 单。
+--       这与 `dws_sale_daily.order_cnt` 是同一类问题 ——
+--       **跨天可加**（一单只属一个购买日），**跨渠道不可加**。
+--       金额则完全可加（各渠道相加 = 15,738,448.91）。
+--
+--    ③ 不暴露 AVG —— 均值不可加。改暴露「分子 installments_sum + 分母 pay_row_cnt」，
+--       加权均值由看板现算（同 ads_fulfillment_monthly 存 avg_deliver_days +
+--       delivered_cnt 的做法，避免「均值的均值」陷阱）。
+--
+-- 口径：只统计**有效订单**（is_valid），与销售侧一致。
+-- ---------------------------------------------------------------
+DROP VIEW IF EXISTS v_payment_channel;   -- 旧版（全周期聚合、无日期列）
+CREATE OR REPLACE VIEW v_payment_daily_channel AS
+SELECT
+    d.purchase_at::date            AS purchase_date,
+    p.payment_type,
+    COUNT(DISTINCT p.order_id)     AS order_cnt,        -- 跨天可加、跨渠道不可加
+    COUNT(*)                       AS pay_row_cnt,      -- 支付行数（完全可加）
+    ROUND(SUM(p.payment_value), 2) AS payment_amount,   -- 完全可加
+    SUM(p.payment_installments)    AS installments_sum  -- 分子；分母是 pay_row_cnt
+FROM olist_order_payments_dataset p
+JOIN dwd_order d ON d.order_id = p.order_id
+WHERE d.is_valid
+GROUP BY d.purchase_at::date, p.payment_type;
+
+
 -- ============================== 校验 ==============================
 -- ① 日×类目 视图的 GMV 合计应 = 全量 GMV 13494400.74
 -- SELECT ROUND(SUM(gmv),2) FROM v_sale_daily_category;
@@ -127,3 +164,12 @@ FROM ads_user_retention;
 -- FROM v_retention_curve
 -- WHERE is_complete AND cohort_size >= 20
 -- GROUP BY window_days ORDER BY window_days;
+
+-- ⑤ 渠道视图：金额各渠道相加应 = 15,738,448.91；
+--    订单数各渠道相加 = 100,412（虚高，跨渠道不可加，属预期）
+-- SELECT payment_type, SUM(order_cnt), ROUND(SUM(payment_amount),2)
+-- FROM v_payment_daily_channel GROUP BY 1 ORDER BY 3 DESC;
+--
+-- ⑥ 加权平均分期（正确算法：Σ分子 ÷ Σ分母，不是 AVG(均值)）
+-- SELECT ROUND(SUM(installments_sum)::NUMERIC / SUM(pay_row_cnt), 2)
+-- FROM v_payment_daily_channel;
