@@ -415,13 +415,42 @@ python scripts/check_dashboard.py
 | 优先级 | 事项 | 说明 |
 |---|---|---|
 | ✅ | ~~增量加载~~ | **已完成**（第六节）：水位线表 + 按购买日 `DELETE` 区间覆盖写 + 迟到数据回看窗口 |
+| ✅ | ~~调度编排~~ | **已完成（Airflow）**：6 个 task 的 DAG，见下方说明 |
 | 高 | **物理分区改造** | 当前用 `DELETE` 区间实现「覆盖写」语义；换成 PG 原生 `PARTITION BY RANGE` 可让 `DROP PARTITION` 替代 `DELETE`，并支持分区裁剪 |
-| 高 | **调度编排** | Airflow DAG：任务依赖 / 失败重试 / SLA 告警 / 按日回补（backfill） |
 | 中 | **运行日志与监控** | `etl_job_log` 记录批次状态、行数、耗时；行数突变告警 |
 | 中 | **支付表对账 / 评价表分析** | 支付表做 `Σpayment_value` 与明细金额对账；评价表去重保留最新（同订单存在多条评价） |
 | 中 | **SCD2 拉链表示例** | 给卖家 / 商品维度加 `start_date` / `end_date` / `is_current`，演示缓慢变化维 |
 | 低 | **容器化部署** | docker-compose 一键起 PostgreSQL + 调度 + 看板 |
 | 低 | **数据质量规则表** | 把当前分散的对账 SQL 收敛为可配置的 DQ 规则 + 严重级别 |
+
+### 已完成的调度编排（Airflow）
+
+`dags/olist_daily.py` —— 6 个 task 的 DAG，把「一把梭」拆成可**分步重试**的单元：
+
+```
+precheck → dwd_incremental → dws_incremental → ads_incremental → ads_full_only → quality_gate
+```
+
+设计要点：
+
+- **`quality_gate` 独立成最后一个 task** —— 对账不通过就让 DAG 失败。
+  这样能明确区分两种失败：**「跑挂了」**（看 task 日志）和 **「跑完了但数不对」**（看对账输出），
+  不允许下游/看板拿到错数据。
+- **水位线在 `ads_incremental` 成功后才推进** —— 三层都成功才算这次增量算完，失败重跑不会留下半个状态。
+- **`PythonOperator` 而非 `BashOperator`** —— 直接复用 `sql_runner` / `run_all` 的执行原语，
+  保证「调度跑的顺序」和「手工跑的顺序」来自同一份定义，不会漂移。
+- **回放模式**：源 CSV 是静态的，照真实日期跑会永远空转。所以把「真实时间」按**纯函数**
+  映射到数据区间里的某一天（`replay_config.py` 配置），同一个 logical date 永远映射到同一天 ——
+  **幂等性不受影响**；只有 `scheduled__` 运行做映射，手动触发和回补不映射。
+- **配置只有一个来源**：全在 `replay_config.py`（走代码、跟 git），
+  **不用环境变量** —— 曾经因为 systemd 的 `EnvironmentFile` 和 shell `source` 读到两份配置，
+  导致「手动能跑、调度不跑」，极难排查。
+
+> **踩过的坑**（都是"不报错但行为不对"的类型，详见 `docs/Airflow使用手册.md` 第八节）：
+> 6 段 cron 被当作「每 2 小时」（croniter 的第 6 段是「年」不是「秒」）、
+> `retry_exponential_backoff` 让重试从 5 分钟放大到 28 分钟、
+> **`max_active_runs=1` 让一个卡住的 run 把整个 DAG 静默冻结**、
+> `end_date` 设在过去会让调度器静默停止创建 run。
 
 > **关于增量，有一个容易讲错的点**：并非所有 ADS 表都能按日增量更新。
 >
