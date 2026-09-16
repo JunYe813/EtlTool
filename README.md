@@ -82,7 +82,6 @@ EtlData/
 │   │   ├── 01_dwd_inc.sql
 │   │   ├── 02_dws_inc.sql
 │   │   └── 03_ads_inc.sql
-│   └── pg_sql.sql             # 排查/对账草稿本（查询sql，和项目无关）
 ├── scripts/
 │   ├── sql_runner.py          # SQL 执行的公共逻辑
 │   ├── olist_import.py        # CSV → ODS
